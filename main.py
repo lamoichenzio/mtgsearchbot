@@ -1,33 +1,24 @@
-import requests
+import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# Funzione che cerca le carte su Scryfall
-def search_card(query):
-    url = f"https://api.scryfall.com/cards/named?fuzzy={query}"
-    response = requests.get(url)
-    if response.status_code == 200:
-        data = response.json()
-        return f"{data['name']} - {data['set_name']}\n{data['image_uris']['normal']}"
-    else:
-        return "Carta non trovata."
+TOKEN = os.getenv("TELEGRAM_TOKEN")  # prendi il token dalle variabili d'ambiente
 
-# Comando /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Ciao! Scrivimi il nome di una carta Magic.")
+    await update.message.reply_text("Ciao! Bot MTG pronto!")
 
-# Comando di ricerca carte
-async def card_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = ' '.join(context.args)
-    if not query:
-        await update.message.reply_text("Scrivi il nome di una carta dopo il comando /cerca")
-        return
-    result = search_card(query)
-    await update.message.reply_text(result)
+async def card(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Funzione ricerca carte in arrivo...")
 
-if __name__ == '__main__':
-    # Inserisci qui il token del tuo bot
-    application = ApplicationBuilder().token('7882279505:AAGEGOygm27Vw5a1_tqzPUGa97Wf_ydOze8').build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("cerca", card_search))
-    application.run_polling()
+app = ApplicationBuilder().token(TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("cerca", card))
+
+if __name__ == "__main__":
+    # Per Render dobbiamo avviare un webserver (webhook)
+    PORT = int(os.environ.get('PORT', 8443))
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/{TOKEN}"
+    )
