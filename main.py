@@ -1,6 +1,5 @@
 import os
 import requests
-from aiohttp import web
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -30,19 +29,12 @@ async def cerca(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# --- Health check per uptime ping ---
-
-async def healthz(request):
-    return web.Response(text="OK")
-
 # --- Build dell’app e registrazione handler ---
 
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("cerca", cerca))
 
-# Aggiungi la route per /healthz
-app.router.add_get("/healthz", healthz)
 
 # --- Avvio del webhook ---
 
