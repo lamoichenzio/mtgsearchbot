@@ -15,10 +15,12 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("cerca", card))
 
 if __name__ == "__main__":
-    # Per Render dobbiamo avviare un webserver (webhook)
-    PORT = int(os.environ.get('PORT', 8443))
+    PORT = int(os.environ.get("PORT", 8443))
+    HOSTNAME = os.environ["RENDER_EXTERNAL_HOSTNAME"]
+    # Impostiamo url_path per far corrispondere l'endpoint al TOKEN
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        webhook_url=f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/{TOKEN}"
+        url_path=TOKEN,                                    # <<< qui
+        webhook_url=f"https://{HOSTNAME}/{TOKEN}"
     )
