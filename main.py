@@ -1,10 +1,10 @@
-import os
-import requests
+import os, requests
+from urllib.parse import quote_plus, unquote_plus
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    InputMediaPhoto
+    InputMediaPhoto,
 )
 from telegram.ext import (
     ApplicationBuilder,
