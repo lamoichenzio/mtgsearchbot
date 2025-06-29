@@ -116,28 +116,30 @@ async def cerca(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_suggest_page(update, query, suggestions, offset=0, edit=False)
 
 async def suggest_more_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # callback_data = "suggest_more:<query_enc>:<offset>"
     data = update.callback_query.data.split(":", 2)
     _, q_enc, off = data
     query = unquote_plus(q_enc)
     offset = int(off)
 
-    # ricava di nuovo la lista completa di suggerimenti
+    # Ricava di nuovo tutti i suggerimenti
     ac = requests.get(f"https://api.scryfall.com/cards/autocomplete?q={query}")
     suggestions = ac.json().get("data", [])
+
     await update.callback_query.answer()
     await send_suggest_page(update, query, suggestions, offset, edit=True)
 
+
+# -- Funzione rivista per mostrare SOLO bottoni con i nomi --
 async def send_suggest_page(event, query: str, suggestions: list, offset: int, edit: bool):
     page = suggestions[offset: offset+5]
-    lines = [f"{i+offset+1}. {name}" for i, name in enumerate(page)]
-    text = f"Suggerimenti per `{query}` ({offset+1}-{offset+len(page)}):\n" + "\n".join(lines)
 
+    # Costruiamo solo i bottoni
     keyboard = [
-        [InlineKeyboardButton(text=f"{i+offset+1}", callback_data=f"suggest:{name}")]
-        for i, name in enumerate(page)
+        [InlineKeyboardButton(text=name, callback_data=f"suggest:{name}")]
+        for name in page
     ]
-    # se ci sono altri suggerimenti
+
+    # Se ci sono altri suggerimenti, aggiungiamo “Altri suggerimenti”
     if offset + 5 < len(suggestions):
         keyboard.append([
             InlineKeyboardButton(
@@ -145,12 +147,22 @@ async def send_suggest_page(event, query: str, suggestions: list, offset: int, e
                 callback_data=f"suggest_more:{quote_plus(query)}:{offset+5}"
             )
         ])
+
     markup = InlineKeyboardMarkup(keyboard)
+    text = f"Suggerimenti per `{query}` (mostrati {offset+1}–{offset+len(page)}):"
 
     if edit:
-        await event.callback_query.edit_message_text(text, reply_markup=markup)
+        await event.callback_query.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
     else:
-        await event.message.reply_text(text, reply_markup=markup)
+        await event.message.reply_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
 
 async def suggestion_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
