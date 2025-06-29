@@ -76,7 +76,7 @@ async def ricerca(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cards = data.get("data", [])[:5]
     total = data.get("total_cards", 0)
     logger.debug("Trovate %d carte per '%s'", total, query)
-    await send_search_page(update, query, page_num=0, total=total, cards=cards, edit=False)
+    await send_search_page(update, query, offset=0, total=total, cards=cards, edit=False)
 
 async def search_page_callback(update, context):
     # callback_data = "search:<query_enc>:<offset>"
@@ -107,7 +107,7 @@ async def search_page_callback(update, context):
     cards = all_cards[start_in_page : start_in_page + 5]
 
     # Inoltra a send_search_page (edit=True perché è un callback)
-    await send_search_page(update.callback_query, query, offset, total, cards, edit=True)
+    await send_search_page(update.callback_query, query, offset=offset, total=total, cards=cards, edit=True)
 
 
 
