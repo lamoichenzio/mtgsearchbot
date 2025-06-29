@@ -99,24 +99,32 @@ async def search_page_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await send_search_page(update, query, page_num, total, cards, edit=True)
 
 async def send_search_page(event, query, page_num, total, cards, edit):
+    # 1) Se non ci sono carte da mostrare, esci subito
+    if not cards:
+        text = f"😕 Non ci sono altri risultati per «{query}»."
+        if edit:
+            await event.callback_query.edit_message_text(text)
+        else:
+            await event.message.reply_text(text)
+        return
+
+    # 2) Solo qui vado a costruire il media group e il resto
     start = page_num * 5 + 1
     end = start + len(cards) - 1
-    logger.debug("Render media group %d–%d di %d", start, end, total)
 
     media = []
     for i, card in enumerate(cards):
-        if "image_uris" in card:
-            url = card["image_uris"]["small"]
-        else:
-            url = card["card_faces"][0]["image_uris"]["small"]
+        url = card["image_uris"]["small"] if "image_uris" in card else card["card_faces"][0]["image_uris"]["small"]
         caption = f"*{card['name']}* — _{card['set_name']}_" if i == 0 else None
         media.append(InputMediaPhoto(media=url, caption=caption, parse_mode="Markdown"))
 
+    # 3) Mando o aggiorno il media group
     if edit:
         await event.callback_query.edit_message_media(media=media)
     else:
         await event.message.reply_media_group(media=media)
 
+    # 4) Preparo il testo di paginazione sotto
     text = f"Risultati {start}–{end} di {total} per *{query}*"
     buttons = []
     if end < total:
