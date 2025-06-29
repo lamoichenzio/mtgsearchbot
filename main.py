@@ -17,6 +17,19 @@ from telegram.ext import (
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
+# Lista dei campi Scryfall che vuoi suggerire
+FIELD_SUGGESTIONS = [
+    ("type (tipo)",    "type:creature"),
+    ("color (colore)", "color:red"),
+    ("set (espansione)", "set:khm"),
+    ("rarity (rarità)",  "rarity:mythic"),
+    ("cmc<=<valore>",   "cmc<=3"),
+    ("pow>=<valore>",   "pow>=6"),
+    ("tough>=<valore>", "tough>=6"),
+]
+
+
+
 async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text
     if "lebbombe" in txt.upper():
@@ -36,60 +49,75 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ------ HANDLER /ricerca con paginazione ------
 
-async def ricerca(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = ' '.join(context.args)
-    if not query:
+from urllib.parse import quote_plus, unquote_plus
+
+# Comando /ricerca
+async def ricerca(update, context):
+    q = ' '.join(context.args)
+    if not q:
         return await update.message.reply_text("🧐 Usa: /ricerca <keywords>")
 
-    # genera la prima pagina (offset=0)
-    await send_search_page(update, query, offset=0, edit=False)
+    # Chiamata a cards/search con ricerca fulltext
+    r = requests.get("https://api.scryfall.com/cards/search",
+                     params={"q": q, "order": "relevance", "unique": "cards"})
+    data = r.json()
+    cards = data.get("data", [])[:5]
+    total = data.get("total_cards", 0)
+    await send_search_page(update, q, page_num=0, total=total, cards=cards, edit=False)
 
-async def search_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # callback_data = "search:<query_enc>:<offset>"
-    data = update.callback_query.data.split(":", 2)
-    _, q_enc, off = data
-    query = unquote_plus(q_enc)
-    offset = int(off)
+# Callback “▶️ Altri 5”
+async def search_page_callback(update, context):
+    _, q_enc, page_str = update.callback_query.data.split(":")
+    q = unquote_plus(q_enc)
+    page = int(page_str)
+
+    r = requests.get("https://api.scryfall.com/cards/search",
+                     params={"q": q, "order": "relevance", "unique": "cards", "page": page+1})
+    data = r.json()
+    cards = data.get("data", [])[:5]
+    total = data.get("total_cards", 0)
+
     await update.callback_query.answer()
-    await send_search_page(update, query, offset, edit=True)
+    await send_search_page(update, q, page_num=page, total=total, cards=cards, edit=True)
 
-async def send_search_page(event, query: str, offset: int, edit: bool):
-    # chiama Scryfall search
-    resp = requests.get(
-        "https://api.scryfall.com/cards/search",
-        params={"q": query, "order": "relevance", "unique": "cards", "page": offset//5 + 1}
-    )
-    data = resp.json().get("data", [])
-    if not data:
-        text = f"😕 Nessuna carta trovata per “{query}”."
-        if edit:
-            return await event.callback_query.edit_message_text(text)
+
+
+async def send_search_page(event, query: str, page_num: int, total: int, cards: list, edit: bool):
+    # Prepara il media group
+    media = []
+    for i, card in enumerate(cards):
+        # scegli l'URL giusto
+        if "image_uris" in card:
+            url = card["image_uris"]["small"]
         else:
-            return await event.message.reply_text(text)
+            url = card["card_faces"][0]["image_uris"]["small"]
+        # solo la prima foto ha caption con nome e set
+        caption = (f"*{card['name']}* — _{card['set_name']}_") if i == 0 else None
+        media.append(InputMediaPhoto(media=url, caption=caption, parse_mode="Markdown"))
 
-    # Prendi 5 risultati da offset
-    slice_ = data[offset % 5: offset % 5 + 5]
-    lines = [f"*{c['name']}* — _{c['set_name']}_" for c in slice_]
-    text = f"Risultati {offset+1}–{offset+len(slice_)} per *{query}*:\n" + "\n".join(lines)
+    # Invia o aggiorna il media group
+    if edit:
+        await event.callback_query.edit_message_media(media=media)
+    else:
+        await event.message.reply_media_group(media)
 
-    # Inline keyboard
-    keyboard = []
-    # Bottone dettaglio: ogni riga potrebbe avere il suo bottone ma per semplicità no
-    # Paginazione
-    total = resp.json().get("total_cards", len(data))
-    next_offset = offset + 5
-    if next_offset < total:
-        keyboard.append([
+    # Costruisci il messaggio di controllo paginazione
+    start = page_num * 5 + 1
+    end = start + len(cards) - 1
+    text = f"Risultati {start}–{end} di {total} per *{query}*"
+    buttons = []
+    # Se ci sono altri risultati
+    if end < total:
+        buttons = [[
             InlineKeyboardButton(
                 text="▶️ Altri 5",
-                callback_data=f"search:{quote_plus(query)}:{next_offset}"
+                callback_data=f"search:{quote_plus(query)}:{page_num+1}"
             )
-        ])
-
-    markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+        ]]
+    markup = InlineKeyboardMarkup(buttons) if buttons else None
 
     if edit:
-        await event.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
+        await event.callback_query.edit_message_caption(text, parse_mode="Markdown", reply_markup=markup)
     else:
         await event.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
 
@@ -195,6 +223,18 @@ async def send_card(event_source, card, use_query: bool = False):
 
 # ------ BUILD & REGISTER HANDLERS ------
 
+async def field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # l’utente ha cliccato un campo
+    await update.callback_query.answer()
+    field = update.callback_query.data.split(":", 1)[1]
+    # Inviamo un esempio di comando pronto all’uso
+    await update.callback_query.message.reply_text(
+        f"Esempio di utilizzo:\n/ricerca {field} <tuo_valore>\n"
+        "Puoi combinarlo con altre parole, per esempio:\n"
+        f"/ricerca {field} goblin"
+    )
+
+
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("find", ricerca))
@@ -203,6 +243,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(suggest_more_callback, pattern=r"^suggest_more:"))
     app.add_handler(CallbackQueryHandler(suggestion_callback, pattern=r"^suggest:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, disclaimer))
+    app.add_handler(CallbackQueryHandler(field_callback, pattern=r"^field:"))
 
     PORT = int(os.environ.get("PORT", 8443))
     HOST = os.environ["RENDER_EXTERNAL_HOSTNAME"]
