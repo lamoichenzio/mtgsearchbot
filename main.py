@@ -1,17 +1,24 @@
+import os
+import requests
+from urllib.parse import quote_plus, unquote_plus
+
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputMediaPhoto,
 )
-from telegram.ext import CommandHandler, CallbackQueryHandler, ContextTypes
-import requests
-from urllib.parse import quote_plus, unquote_plus
-import os
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
 
+# --- Config ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
+HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
 
-# 1) Definiamo i campi da suggerire
 FIELD_SUGGESTIONS = [
     ("tipo",    "type:creature"),
     ("colore",  "color:red"),
@@ -21,23 +28,27 @@ FIELD_SUGGESTIONS = [
     ("forza≥",  "pow>=6"),
 ]
 
-# 2) Handler /ricerca unificato
+# --- /start ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Ciao! Sono il tuo Bot MTG.\n"
+        "Usa /ricerca per cercare carte per parole chiave, o /cerca per nome esatto."
+    )
+
+# --- /ricerca con field suggestions e paginazione immagini ---
 async def ricerca(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = ' '.join(context.args).strip()
+    query = " ".join(context.args).strip()
     if not query:
-        # Mostriamo i suggerimenti di campo
         keyboard = [
             [InlineKeyboardButton(label, callback_data=f"field:{fld}")]
             for label, fld in FIELD_SUGGESTIONS
         ]
-        markup = InlineKeyboardMarkup(keyboard)
-        return await update.message.reply_text(
+        await update.message.reply_text(
             "🧐 Inserisci parole chiave o scegli uno di questi campi:",
-            reply_markup=markup
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
+        return
 
-    # Se ho argomenti, eseguo la ricerca con media-group e paginazione
-    # (riutilizzo send_search_page e search_page_callback come descritto prima)
     resp = requests.get(
         "https://api.scryfall.com/cards/search",
         params={"q": query, "order": "relevance", "unique": "cards"}
@@ -47,105 +58,83 @@ async def ricerca(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = data.get("total_cards", 0)
     await send_search_page(update, query, page_num=0, total=total, cards=cards, edit=False)
 
-# 3) Quando l’utente tocca un campo, mostriamo un template di comando
-async def field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    field = update.callback_query.data.split(":",1)[1]
-    await update.callback_query.message.reply_text(
-        f"Esempio:\n/ricerca {field} <valore>\n"
-        f"Puoi anche combinare più campi:\n"
-        f"/ricerca {field} goblin"
+async def search_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _, q_enc, page_str = update.callback_query.data.split(":", 2)
+    query = unquote_plus(q_enc)
+    page_num = int(page_str)
+    resp = requests.get(
+        "https://api.scryfall.com/cards/search",
+        params={
+            "q": query,
+            "order": "relevance",
+            "unique": "cards",
+            "page": page_num + 1
+        }
     )
-
-
-
-
-async def disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = update.message.text
-    if "lebbombe" in txt.upper():
-        await update.message.reply_text("⚠️⚠️⚠️ALLARME LEBBOMBE⚠️⚠️⚠️")
-    if "ironia" in txt.upper():
-        await update.message.reply_text("⚠️⚠️⚠️ALLARME IRONIA⚠️⚠️⚠️")
-    if "puntializzi" in txt.upper():
-        await update.message.reply_text("⚠️⚠️⚠️ALLARME PUNTUALIZZATORE⚠️⚠️⚠️")
-    if "puntualizzare" in txt.upper():
-        await update.message.reply_text("⚠️⚠️⚠️ALLARME PUNTUALIZZATORE⚠️⚠️⚠️")
-    if "scherzo" in txt.upper():
-        await update.message.reply_text("⚠️⚠️⚠️ALLARME SCHERZO⚠️⚠️⚠️")
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Vi servono lebbombe?")
-
-# ------ HANDLER /ricerca con paginazione ------
-
-from urllib.parse import quote_plus, unquote_plus
-
-# Callback “▶️ Altri 5”
-async def search_page_callback(update, context):
-    _, q_enc, page_str = update.callback_query.data.split(":")
-    q = unquote_plus(q_enc)
-    page = int(page_str)
-
-    r = requests.get("https://api.scryfall.com/cards/search",
-                     params={"q": q, "order": "relevance", "unique": "cards", "page": page+1})
-    data = r.json()
+    data = resp.json()
     cards = data.get("data", [])[:5]
     total = data.get("total_cards", 0)
-
     await update.callback_query.answer()
-    await send_search_page(update, q, page_num=page, total=total, cards=cards, edit=True)
+    await send_search_page(update, query, page_num, total, cards, edit=True)
 
+async def send_search_page(event, query, page_num, total, cards, edit):
+    start = page_num * 5 + 1
+    end = start + len(cards) - 1
 
-
-async def send_search_page(event, query: str, page_num: int, total: int, cards: list, edit: bool):
-    # Prepara il media group
     media = []
     for i, card in enumerate(cards):
-        # scegli l'URL giusto
+        # seleziona URL della miniatura
         if "image_uris" in card:
             url = card["image_uris"]["small"]
         else:
             url = card["card_faces"][0]["image_uris"]["small"]
-        # solo la prima foto ha caption con nome e set
-        caption = (f"*{card['name']}* — _{card['set_name']}_") if i == 0 else None
+        caption = f"*{card['name']}* — _{card['set_name']}_" if i == 0 else None
         media.append(InputMediaPhoto(media=url, caption=caption, parse_mode="Markdown"))
 
-    # Invia o aggiorna il media group
     if edit:
         await event.callback_query.edit_message_media(media=media)
     else:
-        await event.message.reply_media_group(media)
+        await event.message.reply_media_group(media=media)
 
-    # Costruisci il messaggio di controllo paginazione
-    start = page_num * 5 + 1
-    end = start + len(cards) - 1
     text = f"Risultati {start}–{end} di {total} per *{query}*"
     buttons = []
-    # Se ci sono altri risultati
     if end < total:
-        buttons = [[
+        buttons.append([
             InlineKeyboardButton(
                 text="▶️ Altri 5",
                 callback_data=f"search:{quote_plus(query)}:{page_num+1}"
             )
-        ]]
+        ])
     markup = InlineKeyboardMarkup(buttons) if buttons else None
 
     if edit:
-        await event.callback_query.edit_message_caption(text, parse_mode="Markdown", reply_markup=markup)
+        await event.callback_query.edit_message_caption(
+            text, parse_mode="Markdown", reply_markup=markup
+        )
     else:
-        await event.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+        await event.message.reply_text(
+            text, parse_mode="Markdown", reply_markup=markup
+        )
 
+# --- callback per field suggestion ---
+async def field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    field = update.callback_query.data.split(":", 1)[1]
+    await update.callback_query.message.reply_text(
+        f"Ecco un esempio di utilizzo:\n"
+        f"`/ricerca {field} <valore>`\n"
+        f"Puoi combinare più campi, ad es:\n"
+        f"`/ricerca {field} goblin`",
+        parse_mode="Markdown"
+    )
 
-# ------ HANDLER /cerca (named + autocomplete) con “Altri suggerimenti” ------
-
+# --- /cerca con fuzzy + autocomplete + pulsanti di suggerimento ---
 async def cerca(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = ' '.join(context.args)
+    query = " ".join(context.args).strip()
     if not query:
         return await update.message.reply_text("🧐 Usa: /cerca <nome carta>")
 
-    # tenta fuzzy named
+    # prova fuzzy
     resp = requests.get(f"https://api.scryfall.com/cards/named?fuzzy={query}")
     if resp.status_code == 200:
         return await send_card(update, resp.json())
@@ -155,35 +144,14 @@ async def cerca(update: Update, context: ContextTypes.DEFAULT_TYPE):
     suggestions = ac.json().get("data", [])
     if not suggestions:
         return await update.message.reply_text("😕 Carta non trovata né suggerimenti.")
-
-    # mostra prima pagina di suggerimenti
     await send_suggest_page(update, query, suggestions, offset=0, edit=False)
 
-async def suggest_more_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = update.callback_query.data.split(":", 2)
-    _, q_enc, off = data
-    query = unquote_plus(q_enc)
-    offset = int(off)
-
-    # Ricava di nuovo tutti i suggerimenti
-    ac = requests.get(f"https://api.scryfall.com/cards/autocomplete?q={query}")
-    suggestions = ac.json().get("data", [])
-
-    await update.callback_query.answer()
-    await send_suggest_page(update, query, suggestions, offset, edit=True)
-
-
-# -- Funzione rivista per mostrare SOLO bottoni con i nomi --
-async def send_suggest_page(event, query: str, suggestions: list, offset: int, edit: bool):
-    page = suggestions[offset: offset+5]
-
-    # Costruiamo solo i bottoni
+async def send_suggest_page(event, query, suggestions, offset, edit):
+    page = suggestions[offset : offset + 5]
     keyboard = [
         [InlineKeyboardButton(text=name, callback_data=f"suggest:{name}")]
         for name in page
     ]
-
-    # Se ci sono altri suggerimenti, aggiungiamo “Altri suggerimenti”
     if offset + 5 < len(suggestions):
         keyboard.append([
             InlineKeyboardButton(
@@ -191,41 +159,39 @@ async def send_suggest_page(event, query: str, suggestions: list, offset: int, e
                 callback_data=f"suggest_more:{quote_plus(query)}:{offset+5}"
             )
         ])
-
     markup = InlineKeyboardMarkup(keyboard)
     text = f"Suggerimenti per `{query}` (mostrati {offset+1}–{offset+len(page)}):"
-
     if edit:
-        await event.callback_query.edit_message_text(
-            text,
-            parse_mode="Markdown",
-            reply_markup=markup
-        )
+        await event.callback_query.edit_message_text(text, reply_markup=markup)
     else:
-        await event.message.reply_text(
-            text,
-            parse_mode="Markdown",
-            reply_markup=markup
-        )
+        await event.message.reply_text(text, reply_markup=markup)
+
+async def suggest_more_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _, q_enc, off = update.callback_query.data.split(":", 2)
+    query = unquote_plus(q_enc)
+    offset = int(off)
+    ac = requests.get(f"https://api.scryfall.com/cards/autocomplete?q={query}")
+    suggestions = ac.json().get("data", [])
+    await update.callback_query.answer()
+    await send_suggest_page(update, query, suggestions, offset, edit=True)
 
 async def suggestion_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     chosen = update.callback_query.data.split(":", 1)[1]
     resp = requests.get(f"https://api.scryfall.com/cards/named?exact={chosen}")
     if resp.status_code != 200:
-        return await update.callback_query.message.reply_text("❌ Errore nel recupero.")
+        return await update.callback_query.message.reply_text("❌ Errore nel recupero della carta.")
     await send_card(update.callback_query, resp.json(), use_query=True)
 
-
-# ------ REUTILITY: send_card come prima ------
-
-async def send_card(event_source, card, use_query: bool = False):
+async def send_card(event_source, card, use_query=False):
     caption = (
-        f"*{card['name']}*"
+        f"*{card['name']}* — _{card['set_name']}_\n"
+        f"Mana: `{card.get('mana_cost','')}`  Rarity: `{card['rarity']}`"
     )
-    
     if "image_uris" in card:
-        coro = event_source.message.reply_photo(card["image_uris"]["normal"], caption=caption, parse_mode="Markdown")
+        coro = event_source.message.reply_photo(
+            card["image_uris"]["normal"], caption=caption, parse_mode="Markdown"
+        )
     else:
         media = []
         for i, face in enumerate(card["card_faces"]):
@@ -237,21 +203,21 @@ async def send_card(event_source, card, use_query: bool = False):
         coro = event_source.message.reply_media_group(media)
     await coro
 
-# ------ BUILD & REGISTER HANDLERS ------
-
+# --- Main & Webhook Setup ---
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("find", ricerca))
+
+    # comandi
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("ricerca", ricerca))
+    app.add_handler(CallbackQueryHandler(field_callback, pattern=r"^field:"))
     app.add_handler(CallbackQueryHandler(search_page_callback, pattern=r"^search:"))
-    app.add_handler(CommandHandler("search", cerca))
+    app.add_handler(CommandHandler("cerca", cerca))
     app.add_handler(CallbackQueryHandler(suggest_more_callback, pattern=r"^suggest_more:"))
     app.add_handler(CallbackQueryHandler(suggestion_callback, pattern=r"^suggest:"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, disclaimer))
-    app.add_handler(CallbackQueryHandler(field_callback, pattern=r"^field:"))
-    app.add_handler(CommandHandler("ricerca", ricerca))
 
+    # webhook
     PORT = int(os.environ.get("PORT", 8443))
-    HOST = os.environ["RENDER_EXTERNAL_HOSTNAME"]
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
