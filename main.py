@@ -177,9 +177,9 @@ async def suggestion_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def send_card(event_source, card, use_query: bool = False):
     caption = (
-        f"*{card['name']}* — _{card['set_name']}_\n"
-        f"Mana: `{card.get('mana_cost','')}`  Rarity: `{card['rarity']}`"
+        f"*{card['name']}*"
     )
+    
     if "image_uris" in card:
         coro = event_source.message.reply_photo(card["image_uris"]["normal"], caption=caption, parse_mode="Markdown")
     else:
