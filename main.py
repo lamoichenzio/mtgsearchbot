@@ -1,32 +1,62 @@
-import os, requests
-from urllib.parse import quote_plus, unquote_plus
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputMediaPhoto,
 )
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from telegram.ext import CommandHandler, CallbackQueryHandler, ContextTypes
+import requests
+from urllib.parse import quote_plus, unquote_plus
+import os
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-# Lista dei campi Scryfall che vuoi suggerire
+# 1) Definiamo i campi da suggerire
 FIELD_SUGGESTIONS = [
-    ("type (tipo)",    "type:creature"),
-    ("color (colore)", "color:red"),
-    ("set (espansione)", "set:khm"),
-    ("rarity (rarità)",  "rarity:mythic"),
-    ("cmc<=<valore>",   "cmc<=3"),
-    ("pow>=<valore>",   "pow>=6"),
-    ("tough>=<valore>", "tough>=6"),
+    ("tipo",    "type:creature"),
+    ("colore",  "color:red"),
+    ("set",     "set:khm"),
+    ("rarità",  "rarity:mythic"),
+    ("cmc≤",    "cmc<=3"),
+    ("forza≥",  "pow>=6"),
 ]
+
+# 2) Handler /ricerca unificato
+async def ricerca(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = ' '.join(context.args).strip()
+    if not query:
+        # Mostriamo i suggerimenti di campo
+        keyboard = [
+            [InlineKeyboardButton(label, callback_data=f"field:{fld}")]
+            for label, fld in FIELD_SUGGESTIONS
+        ]
+        markup = InlineKeyboardMarkup(keyboard)
+        return await update.message.reply_text(
+            "🧐 Inserisci parole chiave o scegli uno di questi campi:",
+            reply_markup=markup
+        )
+
+    # Se ho argomenti, eseguo la ricerca con media-group e paginazione
+    # (riutilizzo send_search_page e search_page_callback come descritto prima)
+    resp = requests.get(
+        "https://api.scryfall.com/cards/search",
+        params={"q": query, "order": "relevance", "unique": "cards"}
+    )
+    data = resp.json()
+    cards = data.get("data", [])[:5]
+    total = data.get("total_cards", 0)
+    await send_search_page(update, query, page_num=0, total=total, cards=cards, edit=False)
+
+# 3) Quando l’utente tocca un campo, mostriamo un template di comando
+async def field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    field = update.callback_query.data.split(":",1)[1]
+    await update.callback_query.message.reply_text(
+        f"Esempio:\n/ricerca {field} <valore>\n"
+        f"Puoi anche combinare più campi:\n"
+        f"/ricerca {field} goblin"
+    )
+
 
 
 
@@ -50,20 +80,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ------ HANDLER /ricerca con paginazione ------
 
 from urllib.parse import quote_plus, unquote_plus
-
-# Comando /ricerca
-async def ricerca(update, context):
-    q = ' '.join(context.args)
-    if not q:
-        return await update.message.reply_text("🧐 Usa: /ricerca <keywords>")
-
-    # Chiamata a cards/search con ricerca fulltext
-    r = requests.get("https://api.scryfall.com/cards/search",
-                     params={"q": q, "order": "relevance", "unique": "cards"})
-    data = r.json()
-    cards = data.get("data", [])[:5]
-    total = data.get("total_cards", 0)
-    await send_search_page(update, q, page_num=0, total=total, cards=cards, edit=False)
 
 # Callback “▶️ Altri 5”
 async def search_page_callback(update, context):
@@ -223,18 +239,6 @@ async def send_card(event_source, card, use_query: bool = False):
 
 # ------ BUILD & REGISTER HANDLERS ------
 
-async def field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # l’utente ha cliccato un campo
-    await update.callback_query.answer()
-    field = update.callback_query.data.split(":", 1)[1]
-    # Inviamo un esempio di comando pronto all’uso
-    await update.callback_query.message.reply_text(
-        f"Esempio di utilizzo:\n/ricerca {field} <tuo_valore>\n"
-        "Puoi combinarlo con altre parole, per esempio:\n"
-        f"/ricerca {field} goblin"
-    )
-
-
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("find", ricerca))
@@ -244,6 +248,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(suggestion_callback, pattern=r"^suggest:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, disclaimer))
     app.add_handler(CallbackQueryHandler(field_callback, pattern=r"^field:"))
+    app.add_handler(CommandHandler("ricerca", ricerca))
 
     PORT = int(os.environ.get("PORT", 8443))
     HOST = os.environ["RENDER_EXTERNAL_HOSTNAME"]
