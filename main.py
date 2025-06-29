@@ -11,6 +11,7 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    MessageHandler
 )
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
