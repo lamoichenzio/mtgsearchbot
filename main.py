@@ -78,72 +78,83 @@ async def ricerca(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.debug("Trovate %d carte per '%s'", total, query)
     await send_search_page(update, query, page_num=0, total=total, cards=cards, edit=False)
 
-async def search_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    _, q_enc, page_str = update.callback_query.data.split(":", 2)
-    query = unquote_plus(q_enc)
-    page_num = int(page_str)
-    logger.info("Pagino ricerca '%s': pagina %d", query, page_num+1)
+async def search_page_callback(update, context):
+    # callback_data = "search:<query_enc>:<offset>"
+    _, q_enc, off = update.callback_query.data.split(":", 2)
+    query  = unquote_plus(q_enc)
+    offset = int(off)
+    await update.callback_query.answer()
+
+    # Calcolo quale pagina di Scryfall (ogni pagina = 175 carte)
+    scry_page = offset // 175 + 1
+
+    # Chiamo Scryfall solo su quella pagina
     resp = requests.get(
         "https://api.scryfall.com/cards/search",
         params={
             "q": query,
             "order": "relevance",
             "unique": "cards",
-            "page": page_num + 1
+            "page": scry_page
         }
     )
-    data = resp.json()
-    cards = data.get("data", [])[:5]
-    total = data.get("total_cards", 0)
-    await update.callback_query.answer()
-    await send_search_page(update, query, page_num, total, cards, edit=True)
+    data      = resp.json()
+    total     = data.get("total_cards", 0)
+    all_cards = data.get("data", [])
 
-async def send_search_page(event, query, page_num, total, cards, edit):
-    # 1) Se non ci sono carte da mostrare, esci subito
+    # Calcolo i 5 che mi servono, partendo dall'offset
+    start_in_page = offset % 175
+    cards = all_cards[start_in_page : start_in_page + 5]
+
+    # Inoltra a send_search_page (edit=True perché è un callback)
+    await send_search_page(update.callback_query, query, offset, total, cards, edit=True)
+
+
+
+async def send_search_page(event, query, offset, total, cards, edit):
+    # Se non ci sono carte in questo batch, comunicalo
     if not cards:
-        text = f"😕 Non ci sono altri risultati per «{query}»."
+        msg = f"😕 Non ci sono altri risultati per «{query}»."
         if edit:
-            await event.callback_query.edit_message_text(text)
+            await event.edit_message_text(msg)
         else:
-            await event.message.reply_text(text)
+            await event.message.reply_text(msg)
         return
 
-    # 2) Solo qui vado a costruire il media group e il resto
-    start = page_num * 5 + 1
-    end = start + len(cards) - 1
+    # Indici per la UI
+    start = offset + 1
+    end   = offset + len(cards)
 
+    # Costruisco il media group delle miniature
     media = []
     for i, card in enumerate(cards):
         url = card["image_uris"]["small"] if "image_uris" in card else card["card_faces"][0]["image_uris"]["small"]
         caption = f"*{card['name']}* — _{card['set_name']}_" if i == 0 else None
         media.append(InputMediaPhoto(media=url, caption=caption, parse_mode="Markdown"))
 
-    # 3) Mando o aggiorno il media group
+    # Invia o aggiorna il media group
     if edit:
-        await event.callback_query.edit_message_media(media=media)
+        await event.edit_message_media(media=media)
     else:
         await event.message.reply_media_group(media=media)
 
-    # 4) Preparo il testo di paginazione sotto
-    text = f"Risultati {start}–{end} di {total} per *{query}*"
+    # Pulsante “Altri 5” se serve
     buttons = []
     if end < total:
-        buttons.append([
+        buttons = [[
             InlineKeyboardButton(
                 text="▶️ Altri 5",
-                callback_data=f"search:{quote_plus(query)}:{page_num+1}"
+                callback_data=f"search:{quote_plus(query)}:{offset + 5}"
             )
-        ])
+        ]]
     markup = InlineKeyboardMarkup(buttons) if buttons else None
 
+    # Testo sotto
+    text = f"Risultati {start}–{end} di {total} per *{query}*"
     if edit:
-        await event.callback_query.edit_message_caption(
-            text, parse_mode="Markdown", reply_markup=markup
-        )
+        await event.edit_message_caption(text, parse_mode="Markdown", reply_markup=markup)
     else:
-        await event.message.reply_text(
-            text, parse_mode="Markdown", reply_markup=markup
-        )
+        await event.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
 
 # --- callback per field suggestion ---
 async def field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
