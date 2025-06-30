@@ -155,7 +155,10 @@ async def send_search_page(event, query, offset, total, cards, edit):
 
     # --- 4) edita o invia il messaggio di testo con la tastiera ---
     if edit:
-        await event.edit_message_caption(text, parse_mode="Markdown", reply_markup=markup)
+        # il messaggio con i pulsanti è di tipo testo, quindi lo editi come testo
+        await event.edit_message_text(
+            text, parse_mode="Markdown", reply_markup=markup
+        )
     else:
         await event.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
 
