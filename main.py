@@ -112,33 +112,37 @@ async def search_page_callback(update, context):
 
 
 async def send_search_page(event, query, offset, total, cards, edit):
-    # Se non ci sono carte in questo batch, comunicalo
+    # Se non ci sono carte
     if not cards:
         msg = f"😕 Non ci sono altri risultati per «{query}»."
         if edit:
-            await event.edit_message_text(msg)
+            return await event.edit_message_text(msg)
         else:
-            await event.message.reply_text(msg)
-        return
+            return await event.message.reply_text(msg)
 
-    # Indici per la UI
     start = offset + 1
     end   = offset + len(cards)
 
-    # Costruisco il media group delle miniature
+    # --- 1) costruisci il media group ---
     media = []
     for i, card in enumerate(cards):
-        url = card["image_uris"]["small"] if "image_uris" in card else card["card_faces"][0]["image_uris"]["small"]
+        url = (
+            card["image_uris"]["small"]
+            if "image_uris" in card
+            else card["card_faces"][0]["image_uris"]["small"]
+        )
         caption = f"*{card['name']}* — _{card['set_name']}_" if i == 0 else None
         media.append(InputMediaPhoto(media=url, caption=caption, parse_mode="Markdown"))
 
-    # Invia o aggiorna il media group
+    # --- 2) in base a edit, invia un nuovo media group ---
     if edit:
-        await event.edit_message_media(media=media)
+        # qui non usiamo edit_message_media
+        await event.message.reply_media_group(media)
     else:
-        await event.message.reply_media_group(media=media)
+        await event.message.reply_media_group(media)
 
-    # Pulsante “Altri 5” se serve
+    # --- 3) prepara il testo di paginazione ---
+    text = f"Risultati {start}–{end} di {total} per *{query}*"
     buttons = []
     if end < total:
         buttons = [[
@@ -149,8 +153,7 @@ async def send_search_page(event, query, offset, total, cards, edit):
         ]]
     markup = InlineKeyboardMarkup(buttons) if buttons else None
 
-    # Testo sotto
-    text = f"Risultati {start}–{end} di {total} per *{query}*"
+    # --- 4) edita o invia il messaggio di testo con la tastiera ---
     if edit:
         await event.edit_message_caption(text, parse_mode="Markdown", reply_markup=markup)
     else:
