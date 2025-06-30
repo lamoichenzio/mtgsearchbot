@@ -16,32 +16,28 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
-    ConversationHandler,
     ContextTypes,
+    ConversationHandler,
     filters,
 )
 
-# --- CONFIGURA LOG ---
+# --- Logging setup ---
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.DEBUG
 )
 logger = logging.getLogger(__name__)
 
-# --- TOKEN E HOST ---
+# --- Token e Host ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME", "")
 
-# --- STATI CONVERSAZIONE ---
-(
-    CHOOSING_MODE,
-    TYPING_NAME,
-    TYPING_QUERY,
-) = range(3)
+# --- Stati conversazione ---
+CHOOSING_MODE, TYPING_NAME, TYPING_QUERY = range(3)
 
-# --- Start, menu funzionalità ---
+# --- /start e tastiera principale ---
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    logger.info("Comando /start ricevuto")
+    logger.info("[/start] Avviato da %s", update.effective_user.username)
     keyboard = [
         [KeyboardButton("🔍 Cerca per nome")],
         [KeyboardButton("🧩 Ricerca avanzata")]
@@ -52,62 +48,78 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     return CHOOSING_MODE
 
-# --- Gestione scelta modalità ---
+# --- Scelta modalità ---
 async def mode_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    logger.info("Modalità scelta: %s", text)
+    logger.info("[Mode] Selezionato: %s", text)
     if "Cerca per nome" in text:
-        await update.message.reply_text("Inserisci il nome della carta:", reply_markup=ReplyKeyboardMarkup([], resize_keyboard=True))
+        await update.message.reply_text("Inserisci il nome della carta:")
         return TYPING_NAME
     elif "Ricerca avanzata" in text:
         await update.message.reply_text("Inserisci la query (es: c:B cmc=3 o:\"Whenever a creature\"):")
         return TYPING_QUERY
     else:
+        await update.message.reply_text("Scelta non valida, riprova con /start.")
         return CHOOSING_MODE
 
-# --- Cerca per nome ---
+# --- Ricerca per nome con fuzzy + suggerimenti ---
 async def received_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     name = update.message.text.strip()
-    logger.info("Nome richiesto: %s", name)
-    resp = requests.get(f"https://api.scryfall.com/cards/search", params={"q": f'!"{name}"'})
-    data = resp.json()
-    cards = data.get("data", [])
-    if not cards:
-        await update.message.reply_text(f"Nessuna carta trovata per '{name}'. Torna al menu con /start.")
-        return ConversationHandler.END
-    if len(cards) == 1:
-        card = cards[0]
+    logger.info("[Name] Cercando: %s", name)
+
+    # Prova fuzzy
+    resp = requests.get("https://api.scryfall.com/cards/named", params={"fuzzy": name})
+    if resp.status_code == 200:
+        card = resp.json()
+        logger.debug("[Name] Fuzzy trovato: %s", card["name"])
         await send_full_image(update, card)
         return ConversationHandler.END
 
-    keyboard = [[InlineKeyboardButton(f"{c['name']} – {c['set_name']}", callback_data=f"namechoose:{c['id']}")] for c in cards[:5]]
-    await update.message.reply_text("Seleziona la carta:", reply_markup=InlineKeyboardMarkup(keyboard))
-    ctx.user_data["cards_by_id"] = {c["id"]: c for c in cards}
+    logger.debug("[Name] Fuzzy fallito, provo autocomplete")
+    ac_resp = requests.get("https://api.scryfall.com/cards/autocomplete", params={"q": name})
+    suggestions = ac_resp.json().get("data", [])
+    if not suggestions:
+        await update.message.reply_text(f"❌ Nessuna carta trovata per '{name}'. Usa /start per riprovare.")
+        return ConversationHandler.END
+
+    keyboard = [[InlineKeyboardButton(s, callback_data=f"namesuggest:{s}")] for s in suggestions[:10]]
+    await update.message.reply_text(
+        "Non ho trovato una corrispondenza esatta. Ecco dei suggerimenti:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     return ConversationHandler.END
 
-async def handle_name_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def handle_name_suggestion(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    cid = update.callback_query.data.split(":",1)[1]
-    card = ctx.user_data.get("cards_by_id", {}).get(cid)
-    if card:
+    name = update.callback_query.data.split(":", 1)[1]
+    logger.info("[NameSuggest] Selezionato: %s", name)
+    resp = requests.get("https://api.scryfall.com/cards/named", params={"fuzzy": name})
+    if resp.status_code == 200:
+        card = resp.json()
         await send_full_image(update.callback_query, card)
-    return ConversationHandler.END
+    else:
+        logger.error("[NameSuggest] Errore nel recupero della carta per %s", name)
+        await update.callback_query.message.reply_text("❌ Errore nel recupero della carta.")
 
 # --- Ricerca avanzata ---
 async def received_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.strip()
-    logger.info("Query avanzata: %s", query)
+    logger.info("[Query] Ricevuta: %s", query)
     resp = requests.get("https://api.scryfall.com/cards/search", params={"q": query, "unique": "cards", "order": "relevance"})
     data = resp.json()
     cards = data.get("data", [])
     total = data.get("total_cards", 0)
+    logger.debug("[Query] Trovate %d carte", total)
+
     if not cards:
-        await update.message.reply_text("Nessun risultato. Torna al menu con /start.")
+        await update.message.reply_text("❌ Nessun risultato per questa query. Usa /start per riprovare.")
         return ConversationHandler.END
+
     ctx.user_data["query"] = query
     ctx.user_data["total"] = total
     ctx.user_data["all_cards"] = cards
     ctx.user_data["offset"] = 0
+
     await send_query_page(update, ctx)
     return ConversationHandler.END
 
@@ -115,41 +127,54 @@ async def send_query_page(update, ctx):
     offset = ctx.user_data["offset"]
     cards = ctx.user_data["all_cards"][offset:offset+5]
     total = ctx.user_data["total"]
-    logger.debug("Pagina query offset=%d, totale=%d", offset, total)
-    media = [InputMediaPhoto(c.get("image_uris", c["card_faces"][0]["image_uris"])["small"], caption=c["name"]) for c in cards]
-    await update.message.reply_media_group(media)
-    keyboard = []
+    logger.debug("[QueryPage] Offset=%d Totale=%d Mostrando %d carte", offset, total, len(cards))
+
+    media = []
     for c in cards:
-        keyboard.append([InlineKeyboardButton(c["name"], callback_data=f"querychoose:{c['id']}")])
+        img_url = c["image_uris"]["small"] if "image_uris" in c else c["card_faces"][0]["image_uris"]["small"]
+        media.append(InputMediaPhoto(img_url, caption=c["name"]))
+    await update.message.reply_media_group(media)
+
+    keyboard = [[InlineKeyboardButton(c["name"], callback_data=f"querychoose:{c['id']}")] for c in cards]
     if offset + 5 < total:
         keyboard.append([InlineKeyboardButton("▶️ Altri 5", callback_data="querynext")])
-    await update.message.reply_text(f"{offset+1}–{offset+len(cards)} di {total}", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    await update.message.reply_text(
+        f"Risultati {offset+1}-{offset+len(cards)} di {total}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def handle_query_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     data = update.callback_query.data
     if data == "querynext":
         ctx.user_data["offset"] += 5
-        return await send_query_page(update.callback_query, ctx)
-    cid = data.split(":",1)[1]
+        logger.debug("[QueryNext] Offset aggiornato a %d", ctx.user_data["offset"])
+        await send_query_page(update.callback_query, ctx)
+        return
+    cid = data.split(":", 1)[1]
     card = next((c for c in ctx.user_data["all_cards"] if c["id"] == cid), None)
     if card:
+        logger.debug("[QueryChoose] Carta selezionata: %s", card['name'])
         await send_full_image(update.callback_query, card)
+    else:
+        logger.error("[QueryChoose] Carta con ID %s non trovata", cid)
 
-# --- Utility: invia immagine full res ---
+# --- Invia immagine HD ---
 async def send_full_image(source, card):
     if "image_uris" in card:
         url = card["image_uris"]["normal"]
     else:
         url = card["card_faces"][0]["image_uris"]["normal"]
     caption = f"{card['name']} — {card['set_name']}"
+    logger.debug("[SendImage] Inviando immagine: %s", url)
     await source.message.reply_photo(url, caption=caption)
 
 # --- Error handler ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("🚨 Exception while handling update:", exc_info=context.error)
+    logger.error("🚨 Exception gestita:", exc_info=context.error)
     if isinstance(update, Update) and update.effective_message:
-        await update.effective_message.reply_text("❌ Si è verificato un errore interno, riprova più tardi.")
+        await update.effective_message.reply_text("❌ Errore interno, riprova più tardi.")
 
 # --- Dispatcher setup ---
 conv = ConversationHandler(
@@ -165,13 +190,14 @@ conv = ConversationHandler(
 
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(conv)
-app.add_handler(CallbackQueryHandler(handle_name_choice, pattern=r"^namechoose:"))
+app.add_handler(CallbackQueryHandler(handle_name_suggestion, pattern=r"^namesuggest:"))
 app.add_handler(CallbackQueryHandler(handle_query_choice, pattern=r"^(querychoose:|querynext$)"))
 app.add_error_handler(error_handler)
 
+PORT = int(os.getenv("PORT", "8443"))
 app.run_webhook(
     listen="0.0.0.0",
-    port=int(os.getenv("PORT", "8443")),
+    port=PORT,
     url_path=TOKEN,
     webhook_url=f"https://{HOST}/{TOKEN}"
 )
