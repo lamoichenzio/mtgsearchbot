@@ -142,6 +142,12 @@ async def send_full_image(source, card):
     caption = f"{card['name']} — {card['set_name']}"
     await source.message.reply_photo(url, caption=caption)
 
+# --- Error handler ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("🚨 Exception while handling update:", exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        await update.effective_message.reply_text("❌ Si è verificato un errore interno, riprova più tardi.")
+
 # --- Dispatcher setup ---
 conv = ConversationHandler(
     entry_points=[CommandHandler("start", start)],
