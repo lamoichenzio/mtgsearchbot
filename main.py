@@ -138,7 +138,10 @@ async def handle_query_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # --- Utility: invia immagine full res ---
 async def send_full_image(source, card):
-    url = card.get("image_uris", card["card_faces"][0]["image_uris"])["normal"]
+    if "image_uris" in card:
+        url = card["image_uris"]["normal"]
+    else:
+        url = card["card_faces"][0]["image_uris"]["normal"]
     caption = f"{card['name']} — {card['set_name']}"
     await source.message.reply_photo(url, caption=caption)
 
