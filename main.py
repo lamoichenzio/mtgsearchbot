@@ -14,8 +14,8 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
-    filters,
 )
+from telegram.constants import ChatAction
 
 # --- Logging setup ---
 logging.basicConfig(
@@ -32,12 +32,14 @@ HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME", "")
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     logger.info("[/start] Triggered by %s", update.effective_user.username)
     await update.message.reply_text(
-        "👋 Welcome! Use:\n"
-        "/search <card name> to find a card by name\n"
-        "/find <query> for advanced search (color, cmc, keywords...)"
+        "👋 Welcome!\n"
+        "Use:\n"
+        "/search <card name> to find a card by name.\n"
+        "/find <query> for advanced search.\n"
+        "/cleanup <N> to delete last N bot messages."
     )
 
-# --- /search <name> with fuzzy + suggestions ---
+# --- /search ---
 async def search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         return await update.message.reply_text("Usage: /search <card name>")
@@ -65,6 +67,7 @@ async def search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def handle_name_suggestion(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
+    await update.callback_query.edit_message_reply_markup(reply_markup=None)
     name = update.callback_query.data.split(":", 1)[1]
     logger.info("[suggestion] Selected: %s", name)
     resp = requests.get("https://api.scryfall.com/cards/named", params={"fuzzy": name})
@@ -75,7 +78,7 @@ async def handle_name_suggestion(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         logger.error("[suggestion] Failed to retrieve card for %s", name)
         await update.callback_query.message.reply_text("❌ Failed to retrieve this card.")
 
-# --- /find <query> advanced search ---
+# --- /find ---
 async def find(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         return await update.message.reply_text("Usage: /find <query>")
@@ -121,6 +124,7 @@ async def send_query_page(update, ctx):
 
 async def handle_find_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
+    await update.callback_query.edit_message_reply_markup(reply_markup=None)
     data = update.callback_query.data
     if data == "findnext":
         ctx.user_data["offset"] += 5
@@ -136,7 +140,29 @@ async def handle_find_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         logger.error("[findchoose] Card with ID %s not found", cid)
         await update.callback_query.message.reply_text("❌ Could not find this card.")
 
-# --- Send card image in HD ---
+# --- /cleanup ---
+async def cleanup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    args = ctx.args
+    count = int(args[0]) if args and args[0].isdigit() else 15
+    logger.info("[/cleanup] Requested by %s to delete last %d messages", update.effective_user.username, count)
+
+    await update.message.reply_text(f"🧹 Cleaning up last {count} bot messages...")
+
+    chat = update.effective_chat
+
+    try:
+        async for msg in chat.get_history(limit=count + 10):
+            if msg.from_user and msg.from_user.is_bot:
+                try:
+                    await msg.delete()
+                except Exception as e:
+                    logger.warning("[/cleanup] Could not delete message %d: %s", msg.message_id, str(e))
+        await update.message.reply_text("✅ Cleanup completed.")
+    except Exception as e:
+        logger.error("[/cleanup] Error: %s", str(e))
+        await update.message.reply_text("❌ An error occurred during cleanup.")
+
+# --- Send card image ---
 async def send_full_image(source, card):
     if "image_uris" in card:
         url = card["image_uris"]["normal"]
@@ -157,6 +183,7 @@ app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("search", search))
 app.add_handler(CommandHandler("find", find))
+app.add_handler(CommandHandler("cleanup", cleanup))
 app.add_handler(CallbackQueryHandler(handle_name_suggestion, pattern=r"^namesuggest:"))
 app.add_handler(CallbackQueryHandler(handle_find_choice, pattern=r"^(findchoose:|findnext$)"))
 app.add_error_handler(error_handler)
