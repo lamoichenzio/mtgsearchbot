@@ -44,6 +44,41 @@ def format_results_list(cards, offset, total):
         lines.append(f"{idx}. {c.get('name','Unknown')}")
     return "\n".join(lines)
 
+# --- Preview album helpers ---
+async def send_preview_album(message, ctx, cards):
+    """Send a media group of small images for the current page, deleting any previous previews."""
+    # 1) Delete previous preview album, if any
+    album_ids = ctx.user_data.get("album_msg_ids") or []
+    chat_id = ctx.user_data.get("results_chat_id") or message.chat.id
+    for mid in album_ids:
+        try:
+            await ctx.bot.delete_message(chat_id, mid)
+        except Exception:
+            pass
+    ctx.user_data["album_msg_ids"] = []
+
+    # 2) Build media group with small thumbs
+    media = []
+    for c in cards:
+        try:
+            if "image_uris" in c:
+                img_url = c["image_uris"].get("small") or c["image_uris"].get("normal")
+            else:
+                img_url = c["card_faces"][0]["image_uris"].get("small") or c["card_faces"][0]["image_uris"].get("normal")
+            media.append(InputMediaPhoto(img_url, caption=c.get("name", "")))
+        except Exception:
+            continue
+
+    if not media:
+        return
+
+    sent_msgs = await message.reply_media_group(media)
+    album_ids = []
+    for m in sent_msgs:
+        album_ids.append(m.message_id)
+        track_message(ctx, chat_id, m.message_id)
+    ctx.user_data["album_msg_ids"] = album_ids
+
 # --- /start ---
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     logger.info("[/start] Triggered by %s", update.effective_user.username)
@@ -169,6 +204,10 @@ async def find(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["results_msg_id"] = sent.message_id
     ctx.user_data["results_chat_id"] = update.effective_chat.id
     track_message(ctx, update.effective_chat.id, sent.message_id)
+
+    # Also show a visual preview album for the current window (deleted/updated on pagination)
+    await send_preview_album(update.message, ctx, window)
+
     return
 
 # Removed send_query_page function entirely
@@ -189,9 +228,17 @@ async def handle_find_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if card:
             # Replace the list message by deleting it, then send the image
             try:
+                # Delete the list message
                 await ctx.bot.delete_message(chat_id, msg_id)
             except Exception:
                 pass
+            # Delete preview album messages, if any
+            for mid in ctx.user_data.get("album_msg_ids", []):
+                try:
+                    await ctx.bot.delete_message(chat_id, mid)
+                except Exception:
+                    pass
+            ctx.user_data["album_msg_ids"] = []
             await send_full_image(update.callback_query.message, ctx, chat_id, card)
         else:
             await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="❌ Could not find this card.")
@@ -212,6 +259,10 @@ async def handle_find_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         row.append(InlineKeyboardButton("▶️ Next", callback_data="findnext"))
     if row:
         keyboard.append(row)
+
+    # Update the visual preview album for the new page
+    await send_preview_album(update.callback_query.message, ctx, window)
+
     await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # --- /cleanup ---
