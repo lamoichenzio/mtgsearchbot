@@ -8,6 +8,7 @@ from telegram import (
     InlineKeyboardMarkup,
     InputMediaPhoto,
 )
+from telegram.error import TimedOut
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -56,6 +57,7 @@ async def send_preview_album(message, ctx, cards):
     # 1) Delete previous preview album, if any
     album_ids = ctx.user_data.get("album_msg_ids") or []
     chat_id = ctx.user_data.get("results_chat_id") or message.chat.id
+    thread_id = ctx.user_data.get("results_thread_id") or getattr(message, "message_thread_id", None)
     for mid in album_ids:
         try:
             await ctx.bot.delete_message(chat_id, mid)
@@ -78,19 +80,32 @@ async def send_preview_album(message, ctx, cards):
     if not media:
         return
 
-    sent_msgs = await message.reply_media_group(media)
-    album_ids = []
-    for m in sent_msgs:
-        album_ids.append(m.message_id)
-        track_message(ctx, chat_id, m.message_id)
-    ctx.user_data["album_msg_ids"] = album_ids
+    # Telegram sometimes times out fetching many remote URLs; try with 6, then 4, then 2
+    for limit in (6, 4, 2):
+        try:
+            sent_msgs = await ctx.bot.send_media_group(chat_id=chat_id, media=media[:limit], message_thread_id=thread_id, read_timeout=20)
+            album_ids = []
+            for m in sent_msgs:
+                album_ids.append(m.message_id)
+                track_message(ctx, chat_id, m.message_id)
+            ctx.user_data["album_msg_ids"] = album_ids
+            return
+        except TimedOut:
+            logger.warning("[preview] send_media_group timed out with %d items; retrying with fewer...", limit)
+            continue
+        except Exception as e:
+            logger.warning("[preview] send_media_group failed: %s", e)
+            break
+    return
 
 # --- Arts preview album helper ---
 async def send_arts_preview_album(message, ctx, prints_page):
-    """Send a media group of small images for the current arts page; delete previous arts previews."""
+    """Send a media group of small images for the current arts page; delete previous arts previews.
+       Retries with fewer images on timeout to avoid Telegram fetch bottlenecks."""
     # Delete previous arts album if any
     arts_album = ctx.user_data.get("arts_album_msg_ids") or []
     chat_id = ctx.user_data.get("results_chat_id") or message.chat.id
+    thread_id = ctx.user_data.get("results_thread_id") or getattr(message, "message_thread_id", None)
     for mid in arts_album:
         try:
             await ctx.bot.delete_message(chat_id, mid)
@@ -98,7 +113,8 @@ async def send_arts_preview_album(message, ctx, prints_page):
             pass
     ctx.user_data["arts_album_msg_ids"] = []
 
-    media = []
+    # Build candidate media list (small thumbs preferred)
+    photos = []
     for p in prints_page:
         try:
             if "image_uris" in p:
@@ -108,19 +124,32 @@ async def send_arts_preview_album(message, ctx, prints_page):
             else:
                 url = None
             if url:
-                media.append(InputMediaPhoto(url))
+                photos.append(InputMediaPhoto(url))
         except Exception:
             continue
 
-    if not media:
+    if not photos:
         return
 
-    sent_msgs = await message.reply_media_group(media)
-    arts_ids = []
-    for m in sent_msgs:
-        arts_ids.append(m.message_id)
-        track_message(ctx, chat_id, m.message_id)
-    ctx.user_data["arts_album_msg_ids"] = arts_ids
+    # Telegram sometimes times out fetching many remote URLs; try with 6, then 4, then 2
+    for limit in (6, 4, 2):
+        media = photos[:limit]
+        try:
+            sent_msgs = await ctx.bot.send_media_group(chat_id=chat_id, media=media, message_thread_id=thread_id, read_timeout=20)
+            arts_ids = []
+            for m in sent_msgs:
+                arts_ids.append(m.message_id)
+                track_message(ctx, chat_id, m.message_id)
+            ctx.user_data["arts_album_msg_ids"] = arts_ids
+            return
+        except TimedOut:
+            logger.warning("[arts_preview] send_media_group timed out with %d items; retrying with fewer...", limit)
+            continue
+        except Exception as e:
+            logger.warning("[arts_preview] send_media_group failed: %s", e)
+            break
+    # If all retries failed, give up quietly (menu buttons still work)
+    return
 
 # --- /start ---
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
