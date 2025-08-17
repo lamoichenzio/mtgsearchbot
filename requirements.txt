@@ -1,4 +1,2 @@
 python-telegram-bot[webhooks]==22.1
 requests
-Pillow
-httpx
