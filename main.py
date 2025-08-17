@@ -341,6 +341,35 @@ async def handle_oracle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # If the current message is text (unlikely here), edit text instead
         await update.callback_query.message.edit_text(caption, reply_markup=base_card_kb(card_id))
 
+
+# --- Arts menu pagination helpers ---
+async def render_arts_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    state = ctx.user_data.get("arts_state") or {}
+    prints = state.get("prints", [])
+    offset = state.get("offset", 0)
+    card_id = state.get("card_id")
+
+    page_items = prints[offset:offset+10]
+    rows = []
+    for p in page_items:
+        label = f"{p.get('set','').upper()} #{p.get('collector_number','?')}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"pickart:{p.get('id')}")])
+
+    nav_row = []
+    if offset > 0:
+        nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data="artsnav:prev"))
+    # If there are more locally available items or more to fetch, show Next
+    has_more_local = offset + 10 < len(prints)
+    has_more_remote = state.get("has_more", False)
+    if has_more_local or has_more_remote:
+        nav_row.append(InlineKeyboardButton("▶️ Next", callback_data="artsnav:next"))
+    rows.append(nav_row or [InlineKeyboardButton("⬅️ Indietro", callback_data=f"back:{card_id}")])
+
+    # Always include a Back row at the end
+    rows.append([InlineKeyboardButton("⬅️ Indietro", callback_data=f"back:{card_id}")])
+
+    await update.callback_query.message.edit_reply_markup(InlineKeyboardMarkup(rows))
+
 async def handle_arts_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     card_id = update.callback_query.data.split(":", 1)[1]
@@ -351,16 +380,56 @@ async def handle_arts_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not prints_url:
         await update.callback_query.answer("No alternate illustrations")
         return
+
     pr = requests.get(prints_url)
     pdata = pr.json()
     prints = pdata.get("data", [])
-    # Build a compact menu: show up to 10 options by set code and collector number
-    rows = []
-    for p in prints[:10]:
-        label = f"{p.get('set','').upper()} #{p.get('collector_number','?')}"
-        rows.append([InlineKeyboardButton(label, callback_data=f"pickart:{p.get('id')}")])
-    rows.append([InlineKeyboardButton("⬅️ Indietro", callback_data=f"back:{card_id}")])
-    await update.callback_query.message.edit_reply_markup(InlineKeyboardMarkup(rows))
+
+    ctx.user_data["arts_state"] = {
+        "card_id": card_id,
+        "prints": prints,
+        "offset": 0,
+        "has_more": pdata.get("has_more", False),
+        "next_url": pdata.get("next_page"),
+    }
+
+    await render_arts_menu(update, ctx)
+
+async def handle_arts_nav(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    direction = update.callback_query.data.split(":", 1)[1]
+    state = ctx.user_data.get("arts_state") or {}
+    if not state:
+        await update.callback_query.answer("No art list loaded")
+        return
+
+    offset = state.get("offset", 0)
+    prints = state.get("prints", [])
+    has_more = state.get("has_more", False)
+    next_url = state.get("next_url")
+
+    if direction == "prev":
+        offset = max(0, offset - 10)
+    else:  # next
+        offset += 10
+        # If we need more items to fulfill this page and remote has more, fetch next page and extend
+        if offset + 10 > len(prints) and has_more and next_url:
+            pr = requests.get(next_url)
+            pdata = pr.json()
+            new_prints = pdata.get("data", [])
+            prints.extend(new_prints)
+            state["has_more"] = pdata.get("has_more", False)
+            state["next_url"] = pdata.get("next_page")
+
+    # Clamp offset to available range
+    if offset >= len(prints):
+        offset = max(0, len(prints) - 10)
+
+    state["offset"] = offset
+    state["prints"] = prints
+    ctx.user_data["arts_state"] = state
+
+    await render_arts_menu(update, ctx)
 
 async def handle_pick_art(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -404,6 +473,7 @@ app.add_handler(CallbackQueryHandler(handle_oracle, pattern=r"^oracle:"))
 app.add_handler(CallbackQueryHandler(handle_arts_menu, pattern=r"^arts:"))
 app.add_handler(CallbackQueryHandler(handle_pick_art, pattern=r"^pickart:"))
 app.add_handler(CallbackQueryHandler(handle_back_from_arts, pattern=r"^back:"))
+app.add_handler(CallbackQueryHandler(handle_arts_nav, pattern=r"^artsnav:(prev|next)$"))
 app.add_error_handler(error_handler)
 
 PORT = int(os.getenv("PORT", "8443"))
