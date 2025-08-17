@@ -44,6 +44,12 @@ def format_results_list(cards, offset, total):
         lines.append(f"{idx}. {c.get('name','Unknown')}")
     return "\n".join(lines)
 
+def base_card_kb(card_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 Oracle", callback_data=f"oracle:{card_id}"),
+         InlineKeyboardButton("🎨 Illustrazioni", callback_data=f"arts:{card_id}")]
+    ])
+
 # --- Preview album helpers ---
 async def send_preview_album(message, ctx, cards):
     """Send a media group of small images for the current page, deleting any previous previews."""
@@ -65,7 +71,7 @@ async def send_preview_album(message, ctx, cards):
                 img_url = c["image_uris"].get("small") or c["image_uris"].get("normal")
             else:
                 img_url = c["card_faces"][0]["image_uris"].get("small") or c["card_faces"][0]["image_uris"].get("normal")
-            media.append(InputMediaPhoto(img_url, caption=c.get("name", "")))
+            media.append(InputMediaPhoto(img_url))
         except Exception:
             continue
 
@@ -119,7 +125,7 @@ async def search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.delete_message(ctx.user_data["results_chat_id"], ctx.user_data["results_msg_id"])
         except Exception:
             pass
-        await send_full_image(update.message, ctx, update.effective_chat.id, card)
+        await send_full_image(update.message, ctx, update.effective_chat.id, card, kb=base_card_kb(card["id"]))
         return
 
     logger.debug("[/search] Fuzzy failed, trying autocomplete")
@@ -154,7 +160,7 @@ async def handle_name_suggestion(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
             await ctx.bot.delete_message(chat_id, msg_id)
         except Exception:
             pass
-        await send_full_image(update.callback_query.message, ctx, update.callback_query.message.chat.id, card)
+        await send_full_image(update.callback_query.message, ctx, update.callback_query.message.chat.id, card, kb=base_card_kb(card["id"]))
         return
     else:
         chat_id = ctx.user_data.get("results_chat_id") or update.callback_query.message.chat.id
@@ -239,7 +245,7 @@ async def handle_find_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
             ctx.user_data["album_msg_ids"] = []
-            await send_full_image(update.callback_query.message, ctx, chat_id, card)
+            await send_full_image(update.callback_query.message, ctx, chat_id, card, kb=base_card_kb(card["id"]))
         else:
             await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="❌ Could not find this card.")
         return
@@ -292,13 +298,14 @@ async def cleanup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         track_message(ctx, chat_id, sent.message_id)
 
 # --- Send card image ---
-async def send_full_image(message, ctx, chat_id, card):
+async def send_full_image(message, ctx, chat_id, card, kb=None, caption=None):
     if "image_uris" in card:
         url = card["image_uris"]["normal"]
     else:
         url = card["card_faces"][0]["image_uris"]["normal"]
-    caption = f"{card['name']} — {card['set_name']}"
-    sent = await message.reply_photo(url, caption=caption)
+    if caption is None:
+        caption = f"{card['name']} — {card['set_name']}"
+    sent = await message.reply_photo(url, caption=caption, reply_markup=kb)
     track_message(ctx, chat_id, sent.message_id)
 
 # --- Error handler ---
@@ -308,6 +315,83 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         sent = await update.effective_message.reply_text("❌ An internal error occurred, please try again later.")
         track_message(context, update.effective_chat.id, sent.message_id)
 
+# --- Oracle and arts handlers ---
+async def handle_oracle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    card_id = update.callback_query.data.split(":", 1)[1]
+    # Fetch full card by id to ensure oracle text present
+    try:
+        r = requests.get(f"https://api.scryfall.com/cards/{card_id}")
+        c = r.json()
+    except Exception:
+        await update.callback_query.message.reply_text("❌ Failed to load oracle text.")
+        return
+    # Build caption with oracle (single-line, trimmed)
+    name = c.get("name", "Unknown")
+    set_name = c.get("set_name", "")
+    oracle = c.get("oracle_text") or (c.get("card_faces", [{}])[0].get("oracle_text")) or ""
+    oracle = oracle.replace("\n", " ")
+    if len(oracle) > 900:
+        oracle = oracle[:897].rstrip() + "…"
+    header = f"{name} — {set_name}" if set_name else name
+    caption = f"{header}\n{oracle}" if oracle else header
+    try:
+        await update.callback_query.message.edit_caption(caption, reply_markup=base_card_kb(card_id))
+    except Exception:
+        # If the current message is text (unlikely here), edit text instead
+        await update.callback_query.message.edit_text(caption, reply_markup=base_card_kb(card_id))
+
+async def handle_arts_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    card_id = update.callback_query.data.split(":", 1)[1]
+    # Fetch base card to get prints_search_uri
+    r = requests.get(f"https://api.scryfall.com/cards/{card_id}")
+    base = r.json()
+    prints_url = base.get("prints_search_uri")
+    if not prints_url:
+        await update.callback_query.answer("No alternate illustrations")
+        return
+    pr = requests.get(prints_url)
+    pdata = pr.json()
+    prints = pdata.get("data", [])
+    # Build a compact menu: show up to 10 options by set code and collector number
+    rows = []
+    for p in prints[:10]:
+        label = f"{p.get('set','').upper()} #{p.get('collector_number','?')}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"pickart:{p.get('id')}")])
+    rows.append([InlineKeyboardButton("⬅️ Indietro", callback_data=f"back:{card_id}")])
+    await update.callback_query.message.edit_reply_markup(InlineKeyboardMarkup(rows))
+
+async def handle_pick_art(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    art_id = update.callback_query.data.split(":", 1)[1]
+    # Fetch selected print
+    r = requests.get(f"https://api.scryfall.com/cards/{art_id}")
+    c = r.json()
+    # Extract image
+    if "image_uris" in c:
+        url = c["image_uris"].get("normal")
+    elif "card_faces" in c and c["card_faces"]:
+        url = c["card_faces"][0]["image_uris"].get("normal")
+    else:
+        await update.callback_query.answer("No image for this print")
+        return
+    name = c.get("name", "")
+    set_name = c.get("set_name", "")
+    caption = f"{name} — {set_name}" if set_name else name
+    try:
+        await update.callback_query.message.edit_media(InputMediaPhoto(url, caption=caption))
+    except Exception as e:
+        logger.warning("[pickart] edit_media failed: %s", e)
+        return
+    # Restore base two buttons for the newly selected print
+    await update.callback_query.message.edit_reply_markup(base_card_kb(c.get("id")))
+
+async def handle_back_from_arts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    card_id = update.callback_query.data.split(":", 1)[1]
+    await update.callback_query.message.edit_reply_markup(base_card_kb(card_id))
+
 # --- Application setup ---
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("start", start))
@@ -316,6 +400,10 @@ app.add_handler(CommandHandler("find", find))
 app.add_handler(CommandHandler("cleanup", cleanup))
 app.add_handler(CallbackQueryHandler(handle_name_suggestion, pattern=r"^namesuggest:"))
 app.add_handler(CallbackQueryHandler(handle_find_choice, pattern=r"^(findchoose:|findnext$|findprev$)"))
+app.add_handler(CallbackQueryHandler(handle_oracle, pattern=r"^oracle:"))
+app.add_handler(CallbackQueryHandler(handle_arts_menu, pattern=r"^arts:"))
+app.add_handler(CallbackQueryHandler(handle_pick_art, pattern=r"^pickart:"))
+app.add_handler(CallbackQueryHandler(handle_back_from_arts, pattern=r"^back:"))
 app.add_error_handler(error_handler)
 
 PORT = int(os.getenv("PORT", "8443"))
