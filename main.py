@@ -2,8 +2,6 @@ import os
 import logging
 import httpx
 import asyncio
-import io
-from PIL import Image, ImageDraw
 
 from telegram import (
     Update,
@@ -62,66 +60,6 @@ def format_results_list(cards, offset, total):
         lines.append(f"{idx}. {c.get('name','Unknown')}")
     return "\n".join(lines)
 
-# --- Image helpers ---
-async def fetch_bytes(url, timeout=4.0):
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.get(url)
-        r.raise_for_status()
-        return r.content
-
-async def build_collage(cards):
-    """Build a 2x3 collage of small images. Returns (bytes_io, caption_text)."""
-    # Layout
-    cols, rows = 3, 2
-    cell_w, cell_h = 320, 220
-    pad = 6
-    W = cols * cell_w + (cols + 1) * pad
-    H = rows * cell_h + (rows + 1) * pad
-    canvas = Image.new("RGB", (W, H), (24, 24, 24))
-    draw = ImageDraw.Draw(canvas)
-
-    # Up to 6 cards
-    caption_lines = []
-    urls = []
-    for c in cards[:6]:
-        if "image_uris" in c:
-            urls.append(c["image_uris"].get("small") or c["image_uris"].get("normal"))
-        elif "card_faces" in c and c["card_faces"]:
-            face0 = c["card_faces"][0]
-            if "image_uris" in face0:
-                urls.append(face0["image_uris"].get("small") or face0["image_uris"].get("normal"))
-        else:
-            urls.append(None)
-
-    # Download and paste
-    for idx, (c, url) in enumerate(zip(cards[:6], urls), start=1):
-        col = (idx - 1) % cols
-        row = (idx - 1) // cols
-        x0 = pad + col * (cell_w + pad)
-        y0 = pad + row * (cell_h + pad)
-        if url:
-            try:
-                img_bytes = await fetch_bytes(url)
-                im = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                im = im.resize((cell_w, cell_h))
-                canvas.paste(im, (x0, y0))
-            except Exception:
-                draw.rectangle([x0, y0, x0+cell_w, y0+cell_h], fill=(60,60,60))
-        else:
-            draw.rectangle([x0, y0, x0+cell_w, y0+cell_h], fill=(60,60,60))
-        # index badge
-        badge = f"{idx}"
-        bx, by = x0 + 8, y0 + 8
-        draw.rectangle([bx-4, by-4, bx+24, by+24], fill=(0,0,0,)),
-        draw.text((bx, by), badge, fill=(255,255,255))
-        caption_lines.append(f"{idx}. {c.get('name','Unknown')}")
-
-    bio = io.BytesIO()
-    canvas.save(bio, format="JPEG", quality=85)
-    bio.seek(0)
-    caption = "\n".join(caption_lines)
-    return bio, caption
-
 # --- /start ---
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     logger.info("[/start] Triggered by %s", update.effective_user.username)
@@ -158,11 +96,6 @@ async def search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if status == 200:
         card = data
         caption, kb = build_card_caption_and_kb(card)
-        rows = kb.inline_keyboard if kb else []
-        rows = [row[:] for row in rows]
-        rows.append([InlineKeyboardButton("🖼️ Mostra immagine", callback_data=f"showimg:{card.get('id')}")])
-        kb = InlineKeyboardMarkup(rows)
-        ctx.user_data["last_card"] = card
         await ctx.bot.edit_message_text(chat_id=ctx.user_data["results_chat_id"], message_id=ctx.user_data["results_msg_id"], text=caption, reply_markup=kb)
         return
 
@@ -192,11 +125,6 @@ async def handle_name_suggestion(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     if status == 200:
         card = data
         caption, kb = build_card_caption_and_kb(card)
-        rows = kb.inline_keyboard if kb else []
-        rows = [row[:] for row in rows]
-        rows.append([InlineKeyboardButton("🖼️ Mostra immagine", callback_data=f"showimg:{card.get('id')}")])
-        kb = InlineKeyboardMarkup(rows)
-        ctx.user_data["last_card"] = card
         await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=caption, reply_markup=kb)
     else:
         await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="❌ Failed to retrieve this card.")
@@ -230,20 +158,14 @@ async def find(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["query"] = query
     ctx.user_data["total"] = total
     ctx.user_data["all_cards"] = cards
-    ctx.user_data["page_offset"] = 0  # offset in groups of 6
+    ctx.user_data["offset"] = 0
 
-    # Build a 2x3 collage preview and a single message with name buttons
-    show_cards = cards[:6]
-    collage_io, caption = await build_collage(show_cards)
-    ctx.user_data["page_offset"] = 0  # offset in groups of 6
-    # One button per card with the card name
-    name_rows = [[InlineKeyboardButton(c.get("name","Unknown"), callback_data=f"findchoose:{c['id']}")] for c in show_cards]
-    nav_row = []
-    if total > 6:
-        nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data="findprev"))
-        nav_row.append(InlineKeyboardButton("▶️ Next", callback_data="findnext"))
-    keyboard_rows = name_rows + ([nav_row] if nav_row else [])
-    sent = await update.message.reply_photo(photo=collage_io, caption=caption, reply_markup=InlineKeyboardMarkup(keyboard_rows))
+    # Initialize or reuse a single message to keep chat clean
+    text = format_results_list(cards[:5], 0, total)
+    keyboard = [[InlineKeyboardButton(c.get("name","Unknown"), callback_data=f"findchoose:{c['id']}")] for c in cards[:5]]
+    if 5 < total:
+        keyboard.append([InlineKeyboardButton("◀️ Prev", callback_data="findprev"), InlineKeyboardButton("▶️ Next", callback_data="findnext")])
+    sent = await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     ctx.user_data["results_msg_id"] = sent.message_id
     ctx.user_data["results_chat_id"] = update.effective_chat.id
     track_message(ctx, update.effective_chat.id, sent.message_id)
@@ -256,112 +178,41 @@ async def handle_find_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg_id = ctx.user_data.get("results_msg_id") or update.callback_query.message.message_id
 
     if data == "findnext":
-        ctx.user_data["page_offset"] = ctx.user_data.get("page_offset", 0) + 1
+        # advance page
+        if ctx.user_data.get("offset") is None:
+            ctx.user_data["offset"] = 0
+        ctx.user_data["offset"] = min(ctx.user_data["offset"] + 5, max(0, ctx.user_data["total"] - 5))
     elif data == "findprev":
-        ctx.user_data["page_offset"] = max(0, ctx.user_data.get("page_offset", 0) - 1)
+        if ctx.user_data.get("offset") is None:
+            ctx.user_data["offset"] = 0
+        ctx.user_data["offset"] = max(0, ctx.user_data["offset"] - 5)
     elif data.startswith("findchoose:"):
         cid = data.split(":", 1)[1]
         card = next((c for c in ctx.user_data["all_cards"] if c["id"] == cid), None)
         if not card:
             await update.callback_query.edit_message_text("❌ Could not find this card.")
             return
-        # Show single card image + two buttons: details toggle and art navigation
-        ctx.user_data["selected_card_id"] = cid
-        ctx.user_data["show_details"] = False
-        # Prepare art list
-        prints_url = card.get("prints_search_uri")
-        prints = []
-        if prints_url:
-            _, pdata = await fetch_json(prints_url)
-            prints = pdata.get("data", [])
-        ctx.user_data["prints"] = prints
-        ctx.user_data["print_index"] = 0
-
-        # Send/replace message with the card image
-        caption, _ = build_card_caption_and_kb(card)
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📝 Dettagli", callback_data="toggledetails")],
-            [InlineKeyboardButton("◀️", callback_data="artprev"), InlineKeyboardButton("▶️", callback_data="artnext")]
-        ])
-        # Replace the collage message with the single photo
-        try:
-            await ctx.bot.delete_message(chat_id, msg_id)
-        except Exception:
-            pass
-        await send_full_image(update.callback_query.message, ctx, chat_id, card, caption=card.get("name",""), kb=kb)
+        # Show final result IN THE SAME MESSAGE (caption + buttons)
+        caption, kb = build_card_caption_and_kb(card)
+        await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=caption, reply_markup=kb)
         return
     else:
         return
 
-    # For pagination branches, rebuild the collage in the same message (6 per page)
-    page_size = 6
+    # For pagination branches, rebuild the list view in the same message
+    offset = ctx.user_data["offset"]
+    cards = ctx.user_data["all_cards"][offset:offset+5]
     total = ctx.user_data["total"]
-    all_cards = ctx.user_data["all_cards"]
-    page_offset = ctx.user_data.get("page_offset", 0)
-    start = page_offset * page_size
-    end = min(start + page_size, total)
-    show_cards = all_cards[start:end]
-    collage_io, caption = await build_collage(show_cards)
-    # Build buttons with card names
-    name_rows = [[InlineKeyboardButton(c.get("name","Unknown"), callback_data=f"findchoose:{c['id']}")] for c in show_cards]
-    nav_row = []
-    if page_offset > 0:
-        nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data="findprev"))
-    if end < total:
-        nav_row.append(InlineKeyboardButton("▶️ Next", callback_data="findnext"))
-
-    keyboard_rows = name_rows + ([nav_row] if nav_row else [])
-    media = InputMediaPhoto(collage_io)
-    await ctx.bot.edit_message_media(chat_id=chat_id, message_id=msg_id, media=media, reply_markup=InlineKeyboardMarkup(keyboard_rows))
-    await ctx.bot.edit_message_caption(chat_id=chat_id, message_id=msg_id, caption=caption)
-    return
-# --- Toggle details callback handler ---
-async def handle_toggle_details(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    chat_id = ctx.user_data.get("results_chat_id") or update.callback_query.message.chat.id
-    msg = update.callback_query.message
-    ctx.user_data["show_details"] = not ctx.user_data.get("show_details", False)
-    # Rebuild caption
-    card = ctx.user_data.get("last_card")
-    if not card:
-        await msg.reply_text("❌ No card selected.")
-        return
-    if ctx.user_data["show_details"]:
-        caption, _ = build_card_caption_and_kb(card)
-    else:
-        caption = card.get("name", "")
-    try:
-        await msg.edit_caption(caption)
-    except Exception:
-        # If it's a text message fallback, edit text
-        await msg.edit_text(caption)
-
-# --- Art navigation callback handler ---
-async def handle_art_nav(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    direction = update.callback_query.data
-    delta = -1 if direction == "artprev" else 1
-    prints = ctx.user_data.get("prints", [])
-    if not prints:
-        await update.callback_query.answer("No alternate arts")
-        return
-    idx = (ctx.user_data.get("print_index", 0) + delta) % len(prints)
-    ctx.user_data["print_index"] = idx
-    p = prints[idx]
-    # Extract image url
-    if "image_uris" in p:
-        url = p["image_uris"].get("normal")
-    elif "card_faces" in p and p["card_faces"]:
-        url = p["card_faces"][0]["image_uris"].get("normal")
-    else:
-        await update.callback_query.answer("No image for this print")
-        return
-    # Edit media in-place
-    media = InputMediaPhoto(url)
-    try:
-        await update.callback_query.message.edit_media(media)
-    except Exception as e:
-        logger.warning("[art_nav] edit_media failed: %s", e)
+    text = format_results_list(cards, offset, total)
+    keyboard = [[InlineKeyboardButton(c.get("name","Unknown"), callback_data=f"findchoose:{c['id']}")] for c in cards]
+    row = []
+    if offset > 0:
+        row.append(InlineKeyboardButton("◀️ Prev", callback_data="findprev"))
+    if offset + 5 < total:
+        row.append(InlineKeyboardButton("▶️ Next", callback_data="findnext"))
+    if row:
+        keyboard.append(row)
+    await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # --- Helpers for captions & inline buttons ---
 def build_card_caption_and_kb(card):
@@ -517,41 +368,14 @@ async def cleanup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         track_message(ctx, chat_id, sent.message_id)
 
 # --- Send card image ---
-async def send_full_image(message, ctx, chat_id, card, caption=None, kb=None):
+async def send_full_image(message, ctx, chat_id, card):
     if "image_uris" in card:
         url = card["image_uris"]["normal"]
     else:
         url = card["card_faces"][0]["image_uris"]["normal"]
-    if caption is None:
-        caption = f"{card['name']} — {card['set_name']}"
-    sent = await message.reply_photo(url, caption=caption, reply_markup=kb)
+    caption = f"{card['name']} — {card['set_name']}"
+    sent = await message.reply_photo(url, caption=caption)
     track_message(ctx, chat_id, sent.message_id)
-
-# --- Show image callback handler ---
-async def handle_show_image(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    cid = update.callback_query.data.split(":", 1)[1]
-    chat_id = ctx.user_data.get("results_chat_id") or update.callback_query.message.chat.id
-    msg_id = ctx.user_data.get("results_msg_id") or update.callback_query.message.message_id
-
-    # Try to find the card by id from stored results; fallback to last_card
-    card = None
-    if "all_cards" in ctx.user_data:
-        card = next((c for c in ctx.user_data["all_cards"] if c.get("id") == cid), None)
-    if card is None:
-        card = ctx.user_data.get("last_card")
-    if card is None:
-        await update.callback_query.edit_message_text("❌ Could not load image for this card.")
-        return
-
-    caption, kb = build_card_caption_and_kb(card)
-
-    # Delete the text message to keep chat clean, then send the photo with caption+buttons
-    try:
-        await ctx.bot.delete_message(chat_id, msg_id)
-    except Exception:
-        pass
-    await send_full_image(update.callback_query.message, ctx, chat_id, card, caption=caption, kb=kb)
 
 # --- Error handler ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -569,9 +393,6 @@ app.add_handler(CommandHandler("find", find))
 app.add_handler(CommandHandler("cleanup", cleanup))
 app.add_handler(CallbackQueryHandler(handle_name_suggestion, pattern=r"^namesuggest:"))
 app.add_handler(CallbackQueryHandler(handle_find_choice, pattern=r"^(findchoose:|findnext$|findprev$)"))
-app.add_handler(CallbackQueryHandler(handle_show_image, pattern=r"^showimg:"))
-app.add_handler(CallbackQueryHandler(handle_toggle_details, pattern=r"^toggledetails$"))
-app.add_handler(CallbackQueryHandler(handle_art_nav, pattern=r"^(artprev|artnext)$"))
 app.add_handler(InlineQueryHandler(inline_query))
 app.add_error_handler(error_handler)
 
