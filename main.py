@@ -1,7 +1,6 @@
 import os
 import logging
-import httpx
-import asyncio
+import requests
 
 from telegram import (
     Update,
@@ -32,17 +31,6 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME", "")
 MAX_TRACKED_MESSAGES = 500
-
-# --- HTTP helper (async, non-blocking) ---
-async def fetch_json(url, params=None, timeout=4.0):
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.get(url, params=params)
-        # Scryfall returns 404 for no-match; we propagate json anyway
-        try:
-            data = r.json()
-        except Exception:
-            data = {}
-        return r.status_code, data
 
 # --- Utility to track sent message IDs ---
 def track_message(ctx, chat_id, message_id):
@@ -79,16 +67,16 @@ async def search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     name = " ".join(ctx.args).strip()
     logger.info("[/search] Searching for: %s", name)
 
-    status, data = await fetch_json("https://api.scryfall.com/cards/named", params={"fuzzy": name})
-    if status == 200:
-        card = data
-        logger.debug("[/search] Fuzzy found: %s", card.get("name"))
+    resp = requests.get("https://api.scryfall.com/cards/named", params={"fuzzy": name})
+    if resp.status_code == 200:
+        card = resp.json()
+        logger.debug("[/search] Fuzzy found: %s", card["name"])
         await send_full_image(update.message, ctx, update.effective_chat.id, card)
         return
 
     logger.debug("[/search] Fuzzy failed, trying autocomplete")
-    status, ac_data = await fetch_json("https://api.scryfall.com/cards/autocomplete", params={"q": name})
-    suggestions = ac_data.get("data", [])
+    ac_resp = requests.get("https://api.scryfall.com/cards/autocomplete", params={"q": name})
+    suggestions = ac_resp.json().get("data", [])
     if not suggestions:
         sent = await update.message.reply_text(f"No results found for '{name}'.")
         track_message(ctx, update.effective_chat.id, sent.message_id)
@@ -106,9 +94,9 @@ async def handle_name_suggestion(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     await update.callback_query.edit_message_reply_markup(reply_markup=None)
     name = update.callback_query.data.split(":", 1)[1]
     logger.info("[suggestion] Selected: %s", name)
-    status, data = await fetch_json("https://api.scryfall.com/cards/named", params={"fuzzy": name})
-    if status == 200:
-        card = data
+    resp = requests.get("https://api.scryfall.com/cards/named", params={"fuzzy": name})
+    if resp.status_code == 200:
+        card = resp.json()
         await send_full_image(update.callback_query.message, ctx, update.callback_query.message.chat.id, card)
     else:
         sent = await update.callback_query.message.reply_text("❌ Failed to retrieve this card.")
@@ -130,7 +118,8 @@ async def find(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = " ".join(ctx.args).strip()
     logger.info("[/find] Query: %s", query)
 
-    status, data = await fetch_json("https://api.scryfall.com/cards/search", params={"q": query, "unique": "cards", "order": "relevance"})
+    resp = requests.get("https://api.scryfall.com/cards/search", params={"q": query, "unique": "cards", "order": "relevance"})
+    data = resp.json()
     cards = data.get("data", [])
     total = data.get("total_cards", 0)
     logger.debug("[/find] Found %d cards", total)
@@ -230,10 +219,8 @@ def build_card_caption_and_kb(card):
 # --- Inline Mode (@bot query) ---
 async def inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = (update.inline_query.query or "").strip()
-    logger.debug("[inline_query] Query='%s' offset='%s' from=%s", q, update.inline_query.offset, update.inline_query.from_user.id)
     # Telegram sends empty queries while the user is typing; avoid spamming the API
     if not q:
-        logger.debug("[inline_query] Empty query, sending empty results")
         await update.inline_query.answer([], cache_time=1, is_personal=True)
         return
 
@@ -250,9 +237,9 @@ async def inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "page": page
     }
     try:
-        status, data = await fetch_json("https://api.scryfall.com/cards/search", params=params, timeout=3.5)
-    except Exception as e:
-        logger.warning("[inline_query] fetch error: %s", e)
+        resp = requests.get("https://api.scryfall.com/cards/search", params=params, timeout=8)
+        data = resp.json()
+    except Exception:
         data = {"data": [], "has_more": False}
 
     cards = data.get("data", [])
@@ -364,6 +351,5 @@ app.run_webhook(
     listen="0.0.0.0",
     port=PORT,
     url_path=TOKEN,
-    webhook_url=f"https://{HOST}/{TOKEN}",
-    allowed_updates=Update.ALL_TYPES
+    webhook_url=f"https://{HOST}/{TOKEN}"
 )
