@@ -67,7 +67,7 @@ async def search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if resp.status_code == 200:
         card = resp.json()
         logger.debug("[/search] Fuzzy found: %s", card["name"])
-        await send_full_image(update, ctx, card)
+        await send_full_image(update.message, ctx, update.effective_chat.id, card)
         return
 
     logger.debug("[/search] Fuzzy failed, trying autocomplete")
@@ -93,10 +93,10 @@ async def handle_name_suggestion(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     resp = requests.get("https://api.scryfall.com/cards/named", params={"fuzzy": name})
     if resp.status_code == 200:
         card = resp.json()
-        await send_full_image(update.callback_query, ctx, card)
+        await send_full_image(update.callback_query.message, ctx, update.callback_query.message.chat.id, card)
     else:
         sent = await update.callback_query.message.reply_text("❌ Failed to retrieve this card.")
-        track_message(ctx, update.effective_chat.id, sent.message_id)
+        track_message(ctx, update.callback_query.message.chat.id, sent.message_id)
 
 # --- /find ---
 async def find(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -130,9 +130,9 @@ async def find(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["all_cards"] = cards
     ctx.user_data["offset"] = 0
 
-    await send_query_page(update, ctx)
+    await send_query_page(update.message, ctx)
 
-async def send_query_page(update, ctx):
+async def send_query_page(message, ctx):
     offset = ctx.user_data["offset"]
     cards = ctx.user_data["all_cards"][offset:offset+5]
     total = ctx.user_data["total"]
@@ -142,19 +142,19 @@ async def send_query_page(update, ctx):
     for c in cards:
         img_url = c["image_uris"]["small"] if "image_uris" in c else c["card_faces"][0]["image_uris"]["small"]
         media.append(InputMediaPhoto(img_url, caption=c["name"]))
-    sent_msgs = await update.message.reply_media_group(media)
+    sent_msgs = await message.reply_media_group(media)
     for msg in sent_msgs:
-        track_message(ctx, update.effective_chat.id, msg.message_id)
+        track_message(ctx, message.chat.id, msg.message_id)
 
     keyboard = [[InlineKeyboardButton(c["name"], callback_data=f"findchoose:{c['id']}")] for c in cards]
     if offset + 5 < total:
         keyboard.append([InlineKeyboardButton("▶️ Show more", callback_data="findnext")])
 
-    sent = await update.message.reply_text(
+    sent = await message.reply_text(
         f"Results {offset+1}-{offset+len(cards)} of {total}:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    track_message(ctx, update.effective_chat.id, sent.message_id)
+    track_message(ctx, message.chat.id, sent.message_id)
 
 async def handle_find_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -163,15 +163,15 @@ async def handle_find_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "findnext":
         ctx.user_data["offset"] += 5
         logger.debug("[findnext] Offset updated to %d", ctx.user_data["offset"])
-        await send_query_page(update.callback_query, ctx)
+        await send_query_page(update.callback_query.message, ctx)
         return
     cid = data.split(":", 1)[1]
     card = next((c for c in ctx.user_data["all_cards"] if c["id"] == cid), None)
     if card:
-        await send_full_image(update.callback_query, ctx, card)
+        await send_full_image(update.callback_query.message, ctx, update.callback_query.message.chat.id, card)
     else:
         sent = await update.callback_query.message.reply_text("❌ Could not find this card.")
-        track_message(ctx, update.effective_chat.id, sent.message_id)
+        track_message(ctx, update.callback_query.message.chat.id, sent.message_id)
 
 # --- /cleanup ---
 async def cleanup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -200,14 +200,14 @@ async def cleanup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         track_message(ctx, chat_id, sent.message_id)
 
 # --- Send card image ---
-async def send_full_image(source, ctx, card):
+async def send_full_image(message, ctx, chat_id, card):
     if "image_uris" in card:
         url = card["image_uris"]["normal"]
     else:
         url = card["card_faces"][0]["image_uris"]["normal"]
     caption = f"{card['name']} — {card['set_name']}"
-    sent = await source.message.reply_photo(url, caption=caption)
-    track_message(ctx, source.effective_chat.id, sent.message_id)
+    sent = await message.reply_photo(url, caption=caption)
+    track_message(ctx, chat_id, sent.message_id)
 
 # --- Error handler ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
