@@ -492,36 +492,62 @@ async def handle_arts_nav(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def handle_pick_art(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     art_id = update.callback_query.data.split(":", 1)[1]
+    logger.debug("[pickart] Requested art_id=%s", art_id)
     # Fetch selected print
     r = requests.get(f"https://api.scryfall.com/cards/{art_id}")
     c = r.json()
     # Extract image
+    url = None
     if "image_uris" in c:
         url = c["image_uris"].get("normal")
     elif "card_faces" in c and c["card_faces"]:
         url = c["card_faces"][0]["image_uris"].get("normal")
-    else:
+    if not url:
         await update.callback_query.answer("No image for this print")
+        logger.warning("[pickart] No image_uris for art_id=%s", art_id)
         return
+
     name = c.get("name", "")
     set_name = c.get("set_name", "")
     caption = f"{name} — {set_name}" if set_name else name
+
+    # Try to edit media in place; if it fails, fall back to sending a new message in the same topic
     try:
         await update.callback_query.message.edit_media(InputMediaPhoto(url, caption=caption))
+        # Remove arts preview album if present
+        chat_id = ctx.user_data.get("results_chat_id") or update.callback_query.message.chat.id
+        for mid in ctx.user_data.get("arts_album_msg_ids", []):
+            try:
+                await ctx.bot.delete_message(chat_id, mid)
+            except Exception:
+                pass
+        ctx.user_data["arts_album_msg_ids"] = []
+        # Restore base two buttons for the newly selected print
+        await update.callback_query.message.edit_reply_markup(base_card_kb(c.get("id")))
     except Exception as e:
-        logger.warning("[pickart] edit_media failed: %s", e)
-        return
-    # Remove arts preview album if present
-    chat_id = ctx.user_data.get("results_chat_id") or update.callback_query.message.chat.id
-    for mid in ctx.user_data.get("arts_album_msg_ids", []):
+        logger.warning("[pickart] edit_media failed: %s — falling back to send_photo", e)
+        # Fallback: send a new photo in the same thread, then delete the old message
+        chat_id = ctx.user_data.get("results_chat_id") or update.callback_query.message.chat.id
+        thread_id = ctx.user_data.get("results_thread_id")
         try:
-            await ctx.bot.delete_message(chat_id, mid)
-        except Exception:
-            pass
-    ctx.user_data["arts_album_msg_ids"] = []
-
-    # Restore base two buttons for the newly selected print
-    await update.callback_query.message.edit_reply_markup(base_card_kb(c.get("id")))
+            sent = await ctx.bot.send_photo(chat_id=chat_id, photo=url, caption=caption, reply_markup=base_card_kb(c.get("id")), message_thread_id=thread_id)
+            track_message(ctx, chat_id, sent.message_id)
+            # delete old
+            try:
+                await ctx.bot.delete_message(chat_id, update.callback_query.message.message_id)
+            except Exception as de:
+                logger.debug("[pickart] could not delete old message: %s", de)
+            # remove arts preview album if present
+            for mid in ctx.user_data.get("arts_album_msg_ids", []):
+                try:
+                    await ctx.bot.delete_message(chat_id, mid)
+                except Exception:
+                    pass
+            ctx.user_data["arts_album_msg_ids"] = []
+        except Exception as e2:
+            logger.error("[pickart] fallback send_photo failed: %s", e2)
+            await update.callback_query.answer("❌ Unable to show this illustration")
+            return
 
 async def handle_back_from_arts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
