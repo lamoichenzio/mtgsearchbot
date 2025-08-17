@@ -239,11 +239,16 @@ async def find(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     offset = ctx.user_data["offset"]
     window = ctx.user_data["all_cards"][offset:offset+5]
-    text = format_results_list(window, offset, total)
     keyboard = [[InlineKeyboardButton(c["name"], callback_data=f"findchoose:{c['id']}")] for c in window]
+    row = []
+    if offset > 0:
+        row.append(InlineKeyboardButton("◀️ Prev", callback_data="findprev"))
     if offset + 5 < total:
-        keyboard.append([InlineKeyboardButton("◀️ Prev", callback_data="findprev"), InlineKeyboardButton("▶️ Next", callback_data="findnext")])
-    sent = await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        row.append(InlineKeyboardButton("▶️ Next", callback_data="findnext"))
+    if row:
+        keyboard.append(row)
+
+    sent = await update.message.reply_text("Scegli una carta:", reply_markup=InlineKeyboardMarkup(keyboard))
     ctx.user_data["results_msg_id"] = sent.message_id
     ctx.user_data["results_chat_id"] = update.effective_chat.id
     track_message(ctx, update.effective_chat.id, sent.message_id)
@@ -293,7 +298,6 @@ async def handle_find_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     offset = ctx.user_data["offset"]
     total = ctx.user_data["total"]
     window = ctx.user_data["all_cards"][offset:offset+5]
-    text = format_results_list(window, offset, total)
     keyboard = [[InlineKeyboardButton(c["name"], callback_data=f"findchoose:{c['id']}")] for c in window]
     row = []
     if offset > 0:
@@ -306,7 +310,7 @@ async def handle_find_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Update the visual preview album for the new page
     await send_preview_album(update.callback_query.message, ctx, window)
 
-    await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=msg_id, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # --- /cleanup ---
 async def cleanup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
