@@ -152,6 +152,7 @@ async def search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     working = await update.message.reply_text("🔎 Cerco…")
     ctx.user_data["results_msg_id"] = working.message_id
     ctx.user_data["results_chat_id"] = update.effective_chat.id
+    ctx.user_data["results_thread_id"] = working.message_thread_id or getattr(update.message, "message_thread_id", None)
     track_message(ctx, update.effective_chat.id, working.message_id)
 
     resp = requests.get("https://api.scryfall.com/cards/named", params={"fuzzy": name})
@@ -251,6 +252,7 @@ async def find(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     sent = await update.message.reply_text("Scegli una carta:", reply_markup=InlineKeyboardMarkup(keyboard))
     ctx.user_data["results_msg_id"] = sent.message_id
     ctx.user_data["results_chat_id"] = update.effective_chat.id
+    ctx.user_data["results_thread_id"] = sent.message_thread_id or getattr(update.message, "message_thread_id", None)
     track_message(ctx, update.effective_chat.id, sent.message_id)
 
     # Also show a visual preview album for the current window (deleted/updated on pagination)
@@ -346,15 +348,26 @@ async def send_full_image(message, ctx, chat_id, card, kb=None, caption=None):
         url = card["card_faces"][0]["image_uris"]["normal"]
     if caption is None:
         caption = f"{card['name']} — {card['set_name']}"
-    sent = await message.reply_photo(url, caption=caption, reply_markup=kb)
+    thread_id = ctx.user_data.get("results_thread_id")
+    sent = await ctx.bot.send_photo(chat_id=chat_id, photo=url, caption=caption, reply_markup=kb, message_thread_id=thread_id)
     track_message(ctx, chat_id, sent.message_id)
 
 # --- Error handler ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("🚨 Exception handled:", exc_info=context.error)
-    if isinstance(update, Update) and update.effective_message:
-        sent = await update.effective_message.reply_text("❌ An internal error occurred, please try again later.")
-        track_message(context, update.effective_chat.id, sent.message_id)
+    try:
+        chat_id = None
+        thread_id = None
+        if isinstance(update, Update):
+            if update.effective_chat:
+                chat_id = update.effective_chat.id
+            if update.effective_message and hasattr(update.effective_message, "message_thread_id"):
+                thread_id = update.effective_message.message_thread_id
+        if chat_id is not None:
+            sent = await context.bot.send_message(chat_id=chat_id, text="❌ An internal error occurred, please try again later.", message_thread_id=thread_id)
+            track_message(context, chat_id, sent.message_id)
+    except Exception as e:
+        logger.error("[error_handler] Failed to notify user: %s", e)
 
 # --- Oracle and arts handlers ---
 async def handle_oracle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
