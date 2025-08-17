@@ -7,12 +7,16 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputMediaPhoto,
+    InlineQueryResultPhoto,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
 )
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    InlineQueryHandler,
 )
 from collections import deque
 
@@ -173,6 +177,120 @@ async def handle_find_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         sent = await update.callback_query.message.reply_text("❌ Could not find this card.")
         track_message(ctx, update.callback_query.message.chat.id, sent.message_id)
 
+# --- Helpers for captions & inline buttons ---
+def build_card_caption_and_kb(card):
+    name = card.get("name", "Unknown")
+    set_name = card.get("set_name", "")
+    type_line = card.get("type_line") or (card.get("card_faces", [{}])[0].get("type_line")) or ""
+    mana_cost = card.get("mana_cost") or (card.get("card_faces", [{}])[0].get("mana_cost")) or ""
+    oracle_text = card.get("oracle_text") or (card.get("card_faces", [{}])[0].get("oracle_text")) or ""
+
+    # compact single-line mana/type row
+    head = f"{name} — {set_name}" if set_name else name
+    mt_row = " ".join(filter(None, [mana_cost, "•", type_line])) if (mana_cost or type_line) else ""
+
+    # trim oracle text to avoid overly long captions
+    if oracle_text:
+        oracle_clean = oracle_text.replace("\n", " ")
+        if len(oracle_clean) > 220:
+            oracle_clean = oracle_clean[:217].rstrip() + "…"
+    else:
+        oracle_clean = ""
+
+    parts = [head]
+    if mt_row:
+        parts.append(mt_row)
+    if oracle_clean:
+        parts.append(oracle_clean)
+    caption = "\n".join(parts)
+
+    # Build inline keyboard with Rulings and Variants
+    rulings_url = card.get("rulings_uri")
+    prints_url = card.get("prints_search_uri")
+    buttons = []
+    if rulings_url:
+        buttons.append(InlineKeyboardButton("📜 Rulings", url=rulings_url))
+    if prints_url:
+        buttons.append(InlineKeyboardButton("🖼️ Varianti", url=prints_url))
+    kb = InlineKeyboardMarkup([buttons]) if buttons else None
+
+    return caption, kb
+
+# --- Inline Mode (@bot query) ---
+async def inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = (update.inline_query.query or "").strip()
+    # Telegram sends empty queries while the user is typing; avoid spamming the API
+    if not q:
+        await update.inline_query.answer([], cache_time=1, is_personal=True)
+        return
+
+    # Map Telegram offset -> Scryfall page (as a string)
+    try:
+        page = int(update.inline_query.offset) if update.inline_query.offset else 1
+    except ValueError:
+        page = 1
+
+    params = {
+        "q": q,
+        "unique": "cards",
+        "order": "relevance",
+        "page": page
+    }
+    try:
+        resp = requests.get("https://api.scryfall.com/cards/search", params=params, timeout=8)
+        data = resp.json()
+    except Exception:
+        data = {"data": [], "has_more": False}
+
+    cards = data.get("data", [])
+    has_more = data.get("has_more", False)
+
+    results = []
+    for c in cards:
+        cid = c.get("id") or str(hash(c.get("name", "unknown")))
+        name = c.get("name", "Unknown")
+        set_name = c.get("set_name", "")
+        caption, kb = build_card_caption_and_kb(c)
+
+        # Prefer images when available, fallback to text result
+        img_small = None
+        img_normal = None
+        if "image_uris" in c:
+            img_small = c["image_uris"].get("small")
+            img_normal = c["image_uris"].get("normal")
+        elif "card_faces" in c and c["card_faces"]:
+            face0 = c["card_faces"][0]
+            if "image_uris" in face0:
+                img_small = face0["image_uris"].get("small")
+                img_normal = face0["image_uris"].get("normal")
+
+        if img_small and img_normal:
+            results.append(
+                InlineQueryResultPhoto(
+                    id=cid,
+                    title=name,
+                    description=set_name,
+                    thumb_url=img_small,
+                    photo_url=img_normal,
+                    caption=caption,
+                    reply_markup=kb
+                )
+            )
+        else:
+            results.append(
+                InlineQueryResultArticle(
+                    id=cid,
+                    title=name,
+                    description=set_name or "Card",
+                    input_message_content=InputTextMessageContent(caption),
+                    reply_markup=kb
+                )
+            )
+
+    next_offset = str(page + 1) if has_more else ""
+    # is_personal keeps results scoped to the querying user
+    await update.inline_query.answer(results, cache_time=5, is_personal=True, next_offset=next_offset)
+
 # --- /cleanup ---
 async def cleanup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     args = ctx.args
@@ -216,6 +334,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         sent = await update.effective_message.reply_text("❌ An internal error occurred, please try again later.")
         track_message(context, update.effective_chat.id, sent.message_id)
 
+# NOTE: Enable Inline Mode for this bot via @BotFather (/setinline)
 # --- Application setup ---
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("start", start))
@@ -224,6 +343,7 @@ app.add_handler(CommandHandler("find", find))
 app.add_handler(CommandHandler("cleanup", cleanup))
 app.add_handler(CallbackQueryHandler(handle_name_suggestion, pattern=r"^namesuggest:"))
 app.add_handler(CallbackQueryHandler(handle_find_choice, pattern=r"^(findchoose:|findnext$)"))
+app.add_handler(InlineQueryHandler(inline_query))
 app.add_error_handler(error_handler)
 
 PORT = int(os.getenv("PORT", "8443"))
