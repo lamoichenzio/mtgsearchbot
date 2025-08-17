@@ -257,19 +257,13 @@ async def inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     cards = data.get("data", [])
     has_more = data.get("has_more", False)
-    total_cards = len(cards)
-    logger.debug("[inline_query] Scryfall returned %d cards (has_more=%s) for page=%d", total_cards, has_more, page)
-
-    # Telegram allows up to 50 results; keep a margin
-    cards = cards[:48]
 
     results = []
     for c in cards:
         cid = c.get("id") or str(hash(c.get("name", "unknown")))
         name = c.get("name", "Unknown")
+        set_name = c.get("set_name", "")
         caption, kb = build_card_caption_and_kb(c)
-        if len(caption) > 1024:
-            caption = caption[:1021] + "…"
 
         # Prefer images when available, fallback to text result
         img_small = None
@@ -283,16 +277,12 @@ async def inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 img_small = face0["image_uris"].get("small")
                 img_normal = face0["image_uris"].get("normal")
 
-        if not (img_small and img_normal) and not name:
-            logger.debug("[inline_query] Skipping card without usable data: %s", c.get("id"))
-            continue
-
         if img_small and img_normal:
             results.append(
                 InlineQueryResultPhoto(
                     id=cid,
                     title=name,
-                    description=c.get("set_name", ""),
+                    description=set_name,
                     thumb_url=img_small,
                     photo_url=img_normal,
                     caption=caption,
@@ -304,16 +294,15 @@ async def inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 InlineQueryResultArticle(
                     id=cid,
                     title=name,
-                    description=c.get("set_name", "") or "Card",
+                    description=set_name or "Card",
                     input_message_content=InputTextMessageContent(caption),
                     reply_markup=kb
                 )
             )
 
     next_offset = str(page + 1) if has_more else ""
-    logger.debug("[inline_query] Sending %d results, next_offset='%s'", len(results), next_offset)
     # is_personal keeps results scoped to the querying user
-    await update.inline_query.answer(results, cache_time=0, is_personal=True, next_offset=next_offset)
+    await update.inline_query.answer(results, cache_time=5, is_personal=True, next_offset=next_offset)
 
 # --- /cleanup ---
 async def cleanup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
