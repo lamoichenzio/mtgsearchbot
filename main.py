@@ -85,6 +85,43 @@ async def send_preview_album(message, ctx, cards):
         track_message(ctx, chat_id, m.message_id)
     ctx.user_data["album_msg_ids"] = album_ids
 
+# --- Arts preview album helper ---
+async def send_arts_preview_album(message, ctx, prints_page):
+    """Send a media group of small images for the current arts page; delete previous arts previews."""
+    # Delete previous arts album if any
+    arts_album = ctx.user_data.get("arts_album_msg_ids") or []
+    chat_id = ctx.user_data.get("results_chat_id") or message.chat.id
+    for mid in arts_album:
+        try:
+            await ctx.bot.delete_message(chat_id, mid)
+        except Exception:
+            pass
+    ctx.user_data["arts_album_msg_ids"] = []
+
+    media = []
+    for p in prints_page:
+        try:
+            if "image_uris" in p:
+                url = p["image_uris"].get("small") or p["image_uris"].get("normal")
+            elif "card_faces" in p and p["card_faces"]:
+                url = p["card_faces"][0]["image_uris"].get("small") or p["card_faces"][0]["image_uris"].get("normal")
+            else:
+                url = None
+            if url:
+                media.append(InputMediaPhoto(url))
+        except Exception:
+            continue
+
+    if not media:
+        return
+
+    sent_msgs = await message.reply_media_group(media)
+    arts_ids = []
+    for m in sent_msgs:
+        arts_ids.append(m.message_id)
+        track_message(ctx, chat_id, m.message_id)
+    ctx.user_data["arts_album_msg_ids"] = arts_ids
+
 # --- /start ---
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     logger.info("[/start] Triggered by %s", update.effective_user.username)
@@ -355,20 +392,24 @@ async def render_arts_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         label = f"{p.get('set','').upper()} #{p.get('collector_number','?')}"
         rows.append([InlineKeyboardButton(label, callback_data=f"pickart:{p.get('id')}")])
 
+    # Navigation row only if needed
     nav_row = []
     if offset > 0:
         nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data="artsnav:prev"))
-    # If there are more locally available items or more to fetch, show Next
     has_more_local = offset + 10 < len(prints)
     has_more_remote = state.get("has_more", False)
     if has_more_local or has_more_remote:
         nav_row.append(InlineKeyboardButton("▶️ Next", callback_data="artsnav:next"))
-    rows.append(nav_row or [InlineKeyboardButton("⬅️ Indietro", callback_data=f"back:{card_id}")])
+    if nav_row:
+        rows.append(nav_row)
 
-    # Always include a Back row at the end
+    # Single Back row at the end
     rows.append([InlineKeyboardButton("⬅️ Indietro", callback_data=f"back:{card_id}")])
 
     await update.callback_query.message.edit_reply_markup(InlineKeyboardMarkup(rows))
+
+    # Also (re)send visual previews for the current arts page
+    await send_arts_preview_album(update.callback_query.message, ctx, page_items)
 
 async def handle_arts_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -453,12 +494,29 @@ async def handle_pick_art(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning("[pickart] edit_media failed: %s", e)
         return
+    # Remove arts preview album if present
+    chat_id = ctx.user_data.get("results_chat_id") or update.callback_query.message.chat.id
+    for mid in ctx.user_data.get("arts_album_msg_ids", []):
+        try:
+            await ctx.bot.delete_message(chat_id, mid)
+        except Exception:
+            pass
+    ctx.user_data["arts_album_msg_ids"] = []
+
     # Restore base two buttons for the newly selected print
     await update.callback_query.message.edit_reply_markup(base_card_kb(c.get("id")))
 
 async def handle_back_from_arts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     card_id = update.callback_query.data.split(":", 1)[1]
+    # Clean arts preview album messages
+    chat_id = ctx.user_data.get("results_chat_id") or update.callback_query.message.chat.id
+    for mid in ctx.user_data.get("arts_album_msg_ids", []):
+        try:
+            await ctx.bot.delete_message(chat_id, mid)
+        except Exception:
+            pass
+    ctx.user_data["arts_album_msg_ids"] = []
     await update.callback_query.message.edit_reply_markup(base_card_kb(card_id))
 
 # --- Application setup ---
