@@ -20,7 +20,7 @@ from collections import deque
 # --- Logging setup ---
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.DEBUG
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,7 @@ async def send_arts_preview_album(message, ctx, prints_page):
 
 # --- /start ---
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.chat_data["is_forum"] = bool(getattr(update.effective_chat, "is_forum", False))
     logger.info("[/start] Triggered by %s", update.effective_user.username)
     sent = await update.message.reply_text(
         "👋 MTG Search Bot ready.\n\n"
@@ -106,6 +107,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # --- /search ---
 async def search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.chat_data["is_forum"] = bool(getattr(update.effective_chat, "is_forum", False))
     if not ctx.args:
         sent = await update.message.reply_text("Usage: /search <card name>")
         track_message(ctx, update.effective_chat.id, sent.message_id)
@@ -117,7 +119,11 @@ async def search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     working = await update.message.reply_text("🔎 Cerco…")
     ctx.chat_data["results_msg_id"] = working.message_id
     ctx.chat_data["results_chat_id"] = update.effective_chat.id
-    ctx.chat_data["results_thread_id"] = getattr(working, "message_thread_id", None) or getattr(update.message, "message_thread_id", None)
+    # Only store thread id if chat is forum, else None
+    if ctx.chat_data.get("is_forum"):
+        ctx.chat_data["results_thread_id"] = getattr(working, "message_thread_id", None) or getattr(update.message, "message_thread_id", None)
+    else:
+        ctx.chat_data["results_thread_id"] = None
     track_message(ctx, update.effective_chat.id, working.message_id)
 
     resp = requests.get("https://api.scryfall.com/cards/named", params={"fuzzy": name})
@@ -173,6 +179,7 @@ async def handle_name_suggestion(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
 
 # --- /find ---
 async def find(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.chat_data["is_forum"] = bool(getattr(update.effective_chat, "is_forum", False))
     if not ctx.args:
         sent = await update.message.reply_text(
             "Usage: /find <query>\n\n"
@@ -217,7 +224,11 @@ async def find(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     sent = await update.message.reply_text("Scegli una carta:", reply_markup=InlineKeyboardMarkup(keyboard))
     ctx.chat_data["results_msg_id"] = sent.message_id
     ctx.chat_data["results_chat_id"] = update.effective_chat.id
-    ctx.chat_data["results_thread_id"] = getattr(sent, "message_thread_id", None) or getattr(update.message, "message_thread_id", None)
+    # Only store thread id if chat is forum, else None
+    if ctx.chat_data.get("is_forum"):
+        ctx.chat_data["results_thread_id"] = getattr(sent, "message_thread_id", None) or getattr(update.message, "message_thread_id", None)
+    else:
+        ctx.chat_data["results_thread_id"] = None
     track_message(ctx, update.effective_chat.id, sent.message_id)
 
     # Also show a visual preview album for the current window (deleted/updated on pagination)
@@ -315,7 +326,7 @@ async def send_full_image(message, ctx, chat_id, card, kb=None, caption=None):
         caption = f"{card['name']} — {card['set_name']}"
     thread_id = ctx.chat_data.get("results_thread_id")
     kwargs = {"chat_id": chat_id, "photo": url, "caption": caption, "reply_markup": kb}
-    if thread_id is not None:
+    if ctx.chat_data.get("is_forum") and thread_id is not None:
         kwargs["message_thread_id"] = thread_id
     sent = await ctx.bot.send_photo(**kwargs)
     track_message(ctx, chat_id, sent.message_id)
@@ -509,7 +520,7 @@ async def handle_pick_art(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         thread_id = ctx.chat_data.get("results_thread_id")
         try:
             kwargs = {"chat_id": chat_id, "photo": url, "caption": caption, "reply_markup": base_card_kb(c.get("id"))}
-            if thread_id is not None:
+            if ctx.chat_data.get("is_forum") and thread_id is not None:
                 kwargs["message_thread_id"] = thread_id
             sent = await ctx.bot.send_photo(**kwargs)
             track_message(ctx, chat_id, sent.message_id)
@@ -544,6 +555,8 @@ async def handle_back_from_arts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.message.edit_reply_markup(base_card_kb(card_id))
 
 # --- Application setup ---
+from telegram.ext import MessageHandler, filters
+
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("search", search))
@@ -556,6 +569,8 @@ app.add_handler(CallbackQueryHandler(handle_arts_menu, pattern=r"^arts:"))
 app.add_handler(CallbackQueryHandler(handle_pick_art, pattern=r"^pickart:"))
 app.add_handler(CallbackQueryHandler(handle_back_from_arts, pattern=r"^back:"))
 app.add_handler(CallbackQueryHandler(handle_arts_nav, pattern=r"^artsnav:(prev|next)$"))
+# Only handle command messages, do not add a generic MessageHandler for all messages
+app.add_handler(MessageHandler(filters.COMMAND, lambda update, ctx: None))
 app.add_error_handler(error_handler)
 
 PORT = int(os.getenv("PORT", "8443"))
