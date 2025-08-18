@@ -2,7 +2,6 @@ import os
 import logging
 import requests
 
-from collections import deque
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -15,7 +14,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
 )
-from telegram.error import TimedOut
+from collections import deque
 
 # --- Logging setup ---
 logging.basicConfig(
@@ -53,106 +52,26 @@ def base_card_kb(card_id):
 
 # --- Preview album helpers ---
 async def send_preview_album(message, ctx, cards):
-    """Send a media group of small images for the current page, deleting any previous previews.
-       Retries with fewer images on timeout to avoid Telegram fetch bottlenecks."""
-    # 1) Delete previous preview album, if any
-    album_ids = ctx.chat_data.get("album_msg_ids") or []
+    """Disable visual previews: delete any previous album and do nothing else."""
     chat_id = ctx.chat_data.get("results_chat_id") or message.chat.id
-    for mid in album_ids:
+    for mid in ctx.chat_data.get("album_msg_ids", []):
         try:
             await ctx.bot.delete_message(chat_id, mid)
         except Exception:
             pass
     ctx.chat_data["album_msg_ids"] = []
-
-    # 2) Build media list with small thumbs
-    media = []
-    for c in cards:
-        try:
-            if "image_uris" in c:
-                img_url = c["image_uris"].get("small") or c["image_uris"].get("normal")
-            else:
-                img_url = c["card_faces"][0]["image_uris"].get("small") or c["card_faces"][0]["image_uris"].get("normal")
-            if img_url:
-                media.append(InputMediaPhoto(img_url))
-        except Exception:
-            continue
-
-    if not media:
-        return
-
-    thread_id = ctx.chat_data.get("results_thread_id") or getattr(message, "message_thread_id", None)
-    # Telegram sometimes times out fetching many remote URLs; try with 6, then 4, then 2
-    for limit in (6, 4, 2):
-        try:
-            kwargs = {"chat_id": chat_id, "media": media[:limit]}
-            if thread_id is not None:
-                kwargs["message_thread_id"] = thread_id
-            sent_msgs = await ctx.bot.send_media_group(read_timeout=20, **kwargs)
-            album_ids = []
-            for m in sent_msgs:
-                album_ids.append(m.message_id)
-                track_message(ctx, chat_id, m.message_id)
-            ctx.chat_data["album_msg_ids"] = album_ids
-            return
-        except TimedOut:
-            logger.warning("[preview] send_media_group timed out with %d items; retrying with fewer...", limit)
-            continue
-        except Exception as e:
-            logger.warning("[preview] send_media_group failed: %s", e)
-            break
     return
 
 # --- Arts preview album helper ---
 async def send_arts_preview_album(message, ctx, prints_page):
-    """Send a media group of small images for the current arts page; delete previous arts previews.
-       Retries with fewer images on timeout to avoid Telegram fetch bottlenecks."""
-    arts_album = ctx.chat_data.get("arts_album_msg_ids") or []
+    """Disable arts previews: delete any previous arts album and do nothing else."""
     chat_id = ctx.chat_data.get("results_chat_id") or message.chat.id
-    thread_id = ctx.chat_data.get("results_thread_id") or getattr(message, "message_thread_id", None)
-
-    for mid in arts_album:
+    for mid in ctx.chat_data.get("arts_album_msg_ids", []):
         try:
             await ctx.bot.delete_message(chat_id, mid)
         except Exception:
             pass
     ctx.chat_data["arts_album_msg_ids"] = []
-
-    photos = []
-    for p in prints_page:
-        try:
-            if "image_uris" in p:
-                url = p["image_uris"].get("small") or p["image_uris"].get("normal")
-            elif "card_faces" in p and p["card_faces"]:
-                url = p["card_faces"][0]["image_uris"].get("small") or p["card_faces"][0]["image_uris"].get("normal")
-            else:
-                url = None
-            if url:
-                photos.append(InputMediaPhoto(url))
-        except Exception:
-            continue
-
-    if not photos:
-        return
-
-    for limit in (6, 4, 2):
-        try:
-            kwargs = {"chat_id": chat_id, "media": photos[:limit]}
-            if thread_id is not None:
-                kwargs["message_thread_id"] = thread_id
-            sent_msgs = await ctx.bot.send_media_group(read_timeout=20, **kwargs)
-            arts_ids = []
-            for m in sent_msgs:
-                arts_ids.append(m.message_id)
-                track_message(ctx, chat_id, m.message_id)
-            ctx.chat_data["arts_album_msg_ids"] = arts_ids
-            return
-        except TimedOut:
-            logger.warning("[arts_preview] send_media_group timed out with %d items; retrying with fewer...", limit)
-            continue
-        except Exception as e:
-            logger.warning("[arts_preview] send_media_group failed: %s", e)
-            break
     return
 
 # --- /start ---
@@ -183,9 +102,9 @@ async def search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Single placeholder to avoid spamming the chat
     working = await update.message.reply_text("🔎 Cerco…")
-    ctx.chat_data["results_msg_id"] = working.message_id
-    ctx.chat_data["results_chat_id"] = update.effective_chat.id
-    ctx.chat_data["results_thread_id"] = getattr(working, "message_thread_id", None) or getattr(update.message, "message_thread_id", None)
+    ctx.user_data["results_msg_id"] = working.message_id
+    ctx.user_data["results_chat_id"] = update.effective_chat.id
+    ctx.user_data["results_thread_id"] = working.message_thread_id or getattr(update.message, "message_thread_id", None)
     track_message(ctx, update.effective_chat.id, working.message_id)
 
     resp = requests.get("https://api.scryfall.com/cards/named", params={"fuzzy": name})
@@ -193,7 +112,7 @@ async def search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         card = resp.json()
         logger.debug("[/search] Fuzzy found: %s", card["name"])
         try:
-            await ctx.bot.delete_message(ctx.chat_data["results_chat_id"], ctx.chat_data["results_msg_id"])
+            await ctx.bot.delete_message(ctx.user_data["results_chat_id"], ctx.user_data["results_msg_id"])
         except Exception:
             pass
         await send_full_image(update.message, ctx, update.effective_chat.id, card, kb=base_card_kb(card["id"]))
@@ -204,16 +123,16 @@ async def search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     suggestions = ac_resp.json().get("data", [])
     if not suggestions:
         await ctx.bot.edit_message_text(
-            chat_id=ctx.chat_data["results_chat_id"],
-            message_id=ctx.chat_data["results_msg_id"],
+            chat_id=ctx.user_data["results_chat_id"],
+            message_id=ctx.user_data["results_msg_id"],
             text=f"No results found for '{name}'."
         )
         return
 
     keyboard = [[InlineKeyboardButton(s, callback_data=f"namesuggest:{s}")] for s in suggestions[:10]]
     await ctx.bot.edit_message_text(
-        chat_id=ctx.chat_data["results_chat_id"],
-        message_id=ctx.chat_data["results_msg_id"],
+        chat_id=ctx.user_data["results_chat_id"],
+        message_id=ctx.user_data["results_msg_id"],
         text="No exact match found. Did you mean:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -226,16 +145,16 @@ async def handle_name_suggestion(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     if resp.status_code == 200:
         card = resp.json()
         try:
-            chat_id = ctx.chat_data.get("results_chat_id") or update.callback_query.message.chat.id
-            msg_id = ctx.chat_data.get("results_msg_id") or update.callback_query.message.message_id
+            chat_id = ctx.user_data.get("results_chat_id") or update.callback_query.message.chat.id
+            msg_id = ctx.user_data.get("results_msg_id") or update.callback_query.message.message_id
             await ctx.bot.delete_message(chat_id, msg_id)
         except Exception:
             pass
         await send_full_image(update.callback_query.message, ctx, update.callback_query.message.chat.id, card, kb=base_card_kb(card["id"]))
         return
     else:
-        chat_id = ctx.chat_data.get("results_chat_id") or update.callback_query.message.chat.id
-        msg_id = ctx.chat_data.get("results_msg_id") or update.callback_query.message.message_id
+        chat_id = ctx.user_data.get("results_chat_id") or update.callback_query.message.chat.id
+        msg_id = ctx.user_data.get("results_msg_id") or update.callback_query.message.message_id
         await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="❌ Failed to retrieve this card.")
         return
 
@@ -266,15 +185,13 @@ async def find(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         track_message(ctx, update.effective_chat.id, sent.message_id)
         return
 
-    ctx.chat_data["query"] = query
-    ctx.chat_data["total"] = total
-    ctx.chat_data["all_cards"] = cards
-    ctx.chat_data["offset"] = 0
+    ctx.user_data["query"] = query
+    ctx.user_data["total"] = total
+    ctx.user_data["all_cards"] = cards
+    ctx.user_data["offset"] = 0
 
-    offset = ctx.chat_data["offset"]
-    window = ctx.chat_data["all_cards"][offset:offset+5]
-
-    # Build only the buttons (no textual list)
+    offset = ctx.user_data["offset"]
+    window = ctx.user_data["all_cards"][offset:offset+5]
     keyboard = [[InlineKeyboardButton(c["name"], callback_data=f"findchoose:{c['id']}")] for c in window]
     row = []
     if offset > 0:
@@ -285,9 +202,9 @@ async def find(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         keyboard.append(row)
 
     sent = await update.message.reply_text("Scegli una carta:", reply_markup=InlineKeyboardMarkup(keyboard))
-    ctx.chat_data["results_msg_id"] = sent.message_id
-    ctx.chat_data["results_chat_id"] = update.effective_chat.id
-    ctx.chat_data["results_thread_id"] = getattr(sent, "message_thread_id", None) or getattr(update.message, "message_thread_id", None)
+    ctx.user_data["results_msg_id"] = sent.message_id
+    ctx.user_data["results_chat_id"] = update.effective_chat.id
+    ctx.user_data["results_thread_id"] = sent.message_thread_id or getattr(update.message, "message_thread_id", None)
     track_message(ctx, update.effective_chat.id, sent.message_id)
 
     # Also show a visual preview album for the current window (deleted/updated on pagination)
@@ -300,16 +217,16 @@ async def find(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def handle_find_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     data = update.callback_query.data
-    chat_id = ctx.chat_data.get("results_chat_id") or update.callback_query.message.chat.id
-    msg_id = ctx.chat_data.get("results_msg_id") or update.callback_query.message.message_id
+    chat_id = ctx.user_data.get("results_chat_id") or update.callback_query.message.chat.id
+    msg_id = ctx.user_data.get("results_msg_id") or update.callback_query.message.message_id
 
     if data == "findnext":
-        ctx.chat_data["offset"] = min(ctx.chat_data["offset"] + 5, max(0, ctx.chat_data["total"] - 5))
+        ctx.user_data["offset"] = min(ctx.user_data["offset"] + 5, max(0, ctx.user_data["total"] - 5))
     elif data == "findprev":
-        ctx.chat_data["offset"] = max(0, ctx.chat_data["offset"] - 5)
+        ctx.user_data["offset"] = max(0, ctx.user_data["offset"] - 5)
     elif data.startswith("findchoose:"):
         cid = data.split(":", 1)[1]
-        card = next((c for c in ctx.chat_data["all_cards"] if c["id"] == cid), None)
+        card = next((c for c in ctx.user_data["all_cards"] if c["id"] == cid), None)
         if card:
             # Replace the list message by deleting it, then send the image
             try:
@@ -318,12 +235,12 @@ async def handle_find_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
             # Delete preview album messages, if any
-            for mid in ctx.chat_data.get("album_msg_ids", []):
+            for mid in ctx.user_data.get("album_msg_ids", []):
                 try:
                     await ctx.bot.delete_message(chat_id, mid)
                 except Exception:
                     pass
-            ctx.chat_data["album_msg_ids"] = []
+            ctx.user_data["album_msg_ids"] = []
             await send_full_image(update.callback_query.message, ctx, chat_id, card, kb=base_card_kb(card["id"]))
         else:
             await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="❌ Could not find this card.")
@@ -331,11 +248,10 @@ async def handle_find_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         return
 
-    # Rebuild current window and update only the keyboard (no text list)
-    offset = ctx.chat_data["offset"]
-    total = ctx.chat_data["total"]
-    window = ctx.chat_data["all_cards"][offset:offset+5]
-
+    # Rebuild current window and edit the same message
+    offset = ctx.user_data["offset"]
+    total = ctx.user_data["total"]
+    window = ctx.user_data["all_cards"][offset:offset+5]
     keyboard = [[InlineKeyboardButton(c["name"], callback_data=f"findchoose:{c['id']}")] for c in window]
     row = []
     if offset > 0:
@@ -384,13 +300,8 @@ async def send_full_image(message, ctx, chat_id, card, kb=None, caption=None):
         url = card["card_faces"][0]["image_uris"]["normal"]
     if caption is None:
         caption = f"{card['name']} — {card['set_name']}"
-
-    thread_id = ctx.chat_data.get("results_thread_id")
-    kwargs = {"chat_id": chat_id, "photo": url, "caption": caption, "reply_markup": kb}
-    if thread_id is not None:
-        kwargs["message_thread_id"] = thread_id
-
-    sent = await ctx.bot.send_photo(**kwargs)
+    thread_id = ctx.user_data.get("results_thread_id")
+    sent = await ctx.bot.send_photo(chat_id=chat_id, photo=url, caption=caption, reply_markup=kb, message_thread_id=thread_id)
     track_message(ctx, chat_id, sent.message_id)
 
 # --- Error handler ---
@@ -405,10 +316,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
             if update.effective_message and hasattr(update.effective_message, "message_thread_id"):
                 thread_id = update.effective_message.message_thread_id
         if chat_id is not None:
-            kwargs = {"chat_id": chat_id, "text": "❌ An internal error occurred, please try again later."}
-            if thread_id is not None:
-                kwargs["message_thread_id"] = thread_id
-            sent = await context.bot.send_message(**kwargs)
+            sent = await context.bot.send_message(chat_id=chat_id, text="❌ An internal error occurred, please try again later.", message_thread_id=thread_id)
             track_message(context, chat_id, sent.message_id)
     except Exception as e:
         logger.error("[error_handler] Failed to notify user: %s", e)
@@ -439,9 +347,10 @@ async def handle_oracle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # If the current message is text (unlikely here), edit text instead
         await update.callback_query.message.edit_text(caption, reply_markup=base_card_kb(card_id))
 
+
 # --- Arts menu pagination helpers ---
 async def render_arts_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    state = ctx.chat_data.get("arts_state") or {}
+    state = ctx.user_data.get("arts_state") or {}
     prints = state.get("prints", [])
     offset = state.get("offset", 0)
     card_id = state.get("card_id")
@@ -486,7 +395,7 @@ async def handle_arts_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     pdata = pr.json()
     prints = pdata.get("data", [])
 
-    ctx.chat_data["arts_state"] = {
+    ctx.user_data["arts_state"] = {
         "card_id": card_id,
         "prints": prints,
         "offset": 0,
@@ -499,7 +408,7 @@ async def handle_arts_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def handle_arts_nav(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     direction = update.callback_query.data.split(":", 1)[1]
-    state = ctx.chat_data.get("arts_state") or {}
+    state = ctx.user_data.get("arts_state") or {}
     if not state:
         await update.callback_query.answer("No art list loaded")
         return
@@ -528,7 +437,7 @@ async def handle_arts_nav(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     state["offset"] = offset
     state["prints"] = prints
-    ctx.chat_data["arts_state"] = state
+    ctx.user_data["arts_state"] = state
 
     await render_arts_menu(update, ctx)
 
@@ -558,25 +467,22 @@ async def handle_pick_art(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         await update.callback_query.message.edit_media(InputMediaPhoto(url, caption=caption))
         # Remove arts preview album if present
-        chat_id = ctx.chat_data.get("results_chat_id") or update.callback_query.message.chat.id
-        for mid in ctx.chat_data.get("arts_album_msg_ids", []):
+        chat_id = ctx.user_data.get("results_chat_id") or update.callback_query.message.chat.id
+        for mid in ctx.user_data.get("arts_album_msg_ids", []):
             try:
                 await ctx.bot.delete_message(chat_id, mid)
             except Exception:
                 pass
-        ctx.chat_data["arts_album_msg_ids"] = []
+        ctx.user_data["arts_album_msg_ids"] = []
         # Restore base two buttons for the newly selected print
         await update.callback_query.message.edit_reply_markup(base_card_kb(c.get("id")))
     except Exception as e:
         logger.warning("[pickart] edit_media failed: %s — falling back to send_photo", e)
         # Fallback: send a new photo in the same thread, then delete the old message
-        chat_id = ctx.chat_data.get("results_chat_id") or update.callback_query.message.chat.id
-        thread_id = ctx.chat_data.get("results_thread_id")
+        chat_id = ctx.user_data.get("results_chat_id") or update.callback_query.message.chat.id
+        thread_id = ctx.user_data.get("results_thread_id")
         try:
-            kwargs = {"chat_id": chat_id, "photo": url, "caption": caption, "reply_markup": base_card_kb(c.get("id"))}
-            if thread_id is not None:
-                kwargs["message_thread_id"] = thread_id
-            sent = await ctx.bot.send_photo(**kwargs)
+            sent = await ctx.bot.send_photo(chat_id=chat_id, photo=url, caption=caption, reply_markup=base_card_kb(c.get("id")), message_thread_id=thread_id)
             track_message(ctx, chat_id, sent.message_id)
             # delete old
             try:
@@ -584,12 +490,12 @@ async def handle_pick_art(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception as de:
                 logger.debug("[pickart] could not delete old message: %s", de)
             # remove arts preview album if present
-            for mid in ctx.chat_data.get("arts_album_msg_ids", []):
+            for mid in ctx.user_data.get("arts_album_msg_ids", []):
                 try:
                     await ctx.bot.delete_message(chat_id, mid)
                 except Exception:
                     pass
-            ctx.chat_data["arts_album_msg_ids"] = []
+            ctx.user_data["arts_album_msg_ids"] = []
         except Exception as e2:
             logger.error("[pickart] fallback send_photo failed: %s", e2)
             await update.callback_query.answer("❌ Unable to show this illustration")
@@ -599,13 +505,13 @@ async def handle_back_from_arts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     card_id = update.callback_query.data.split(":", 1)[1]
     # Clean arts preview album messages
-    chat_id = ctx.chat_data.get("results_chat_id") or update.callback_query.message.chat.id
-    for mid in ctx.chat_data.get("arts_album_msg_ids", []):
+    chat_id = ctx.user_data.get("results_chat_id") or update.callback_query.message.chat.id
+    for mid in ctx.user_data.get("arts_album_msg_ids", []):
         try:
             await ctx.bot.delete_message(chat_id, mid)
         except Exception:
             pass
-    ctx.chat_data["arts_album_msg_ids"] = []
+    ctx.user_data["arts_album_msg_ids"] = []
     await update.callback_query.message.edit_reply_markup(base_card_kb(card_id))
 
 # --- Application setup ---
