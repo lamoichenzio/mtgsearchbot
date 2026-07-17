@@ -63,7 +63,8 @@ def format_results_list(cards, offset, total):
 def base_card_kb(card_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📝 Oracle", callback_data=f"oracle:{card_id}"),
-         InlineKeyboardButton("🎨 Illustrazioni", callback_data=f"arts:{card_id}")]
+         InlineKeyboardButton("💰 Prezzi", callback_data=f"price:{card_id}")],
+        [InlineKeyboardButton("🎨 Illustrazioni", callback_data=f"arts:{card_id}")]
     ])
 
 # --- Preview album helpers ---
@@ -380,13 +381,80 @@ async def handle_oracle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if len(oracle) > 900:
         oracle = oracle[:897].rstrip() + "…"
     header = f"{name} — {set_name}" if set_name else name
-    caption = f"{header}\n{oracle}" if oracle else header
+    full_caption = f"{header}\n{oracle}" if oracle else header
+    
+    current_text = update.callback_query.message.caption or update.callback_query.message.text or ""
+    if current_text.strip() == full_caption.strip():
+        caption = header
+    else:
+        caption = full_caption
     try:
         await update.callback_query.message.edit_caption(caption, reply_markup=base_card_kb(card_id))
-    except Exception:
-        # If the current message is text (unlikely here), edit text instead
-        await update.callback_query.message.edit_text(caption, reply_markup=base_card_kb(card_id))
+    except BadRequest as e:
+        if "not modified" in str(e).lower():
+            pass
+        else:
+            try:
+                await update.callback_query.message.edit_text(caption, reply_markup=base_card_kb(card_id))
+            except BadRequest as e2:
+                if "not modified" not in str(e2).lower():
+                    logger.error(f"[handle_oracle] Fallback edit_text failed: {e2}")
+    except Exception as e:
+        logger.error(f"[handle_oracle] Unexpected error: {e}")
 
+async def handle_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await safe_answer(update.callback_query)
+    card_id = update.callback_query.data.split(":", 1)[1]
+    
+    try:
+        r = http_client.get(f"https://api.scryfall.com/cards/{card_id}")
+        c = r.json()
+    except Exception:
+        await update.callback_query.message.reply_text("❌ Failed to load prices.")
+        return
+        
+    name = c.get("name", "Unknown")
+    set_name = c.get("set_name", "")
+    header = f"{name} — {set_name}" if set_name else name
+    
+    prices = c.get("prices", {})
+    usd = prices.get("usd")
+    usd_foil = prices.get("usd_foil")
+    eur = prices.get("eur")
+    eur_foil = prices.get("eur_foil")
+    
+    price_lines = []
+    if eur: price_lines.append(f"💶 EUR: {eur}€")
+    if eur_foil: price_lines.append(f"✨ EUR Foil: {eur_foil}€")
+    if usd: price_lines.append(f"💵 USD: ${usd}")
+    if usd_foil: price_lines.append(f"✨ USD Foil: ${usd_foil}")
+    
+    if not price_lines:
+        price_text = "Nessun prezzo disponibile."
+    else:
+        price_text = "\n".join(price_lines)
+        
+    full_caption = f"{header}\n\n{price_text}"
+    
+    current_text = update.callback_query.message.caption or update.callback_query.message.text or ""
+    if current_text.strip() == full_caption.strip():
+        caption = header
+    else:
+        caption = full_caption
+        
+    try:
+        await update.callback_query.message.edit_caption(caption, reply_markup=base_card_kb(card_id))
+    except BadRequest as e:
+        if "not modified" in str(e).lower():
+            pass
+        else:
+            try:
+                await update.callback_query.message.edit_text(caption, reply_markup=base_card_kb(card_id))
+            except BadRequest as e2:
+                if "not modified" not in str(e2).lower():
+                    logger.error(f"[handle_price] Fallback edit_text failed: {e2}")
+    except Exception as e:
+        logger.error(f"[handle_price] Unexpected error: {e}")
 
 # --- Arts menu pagination helpers ---
 async def render_arts_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -517,8 +585,11 @@ async def handle_pick_art(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # Restore base two buttons for the newly selected print
         await update.callback_query.message.edit_reply_markup(base_card_kb(c.get("id")))
     except Exception as e:
-        logger.warning("[pickart] edit_media failed: %s — falling back to send_photo", e)
-        # Fallback: send a new photo in the same thread, then delete the old message
+        if isinstance(e, BadRequest) and "not modified" in str(e).lower():
+            pass
+        else:
+            logger.warning("[pickart] edit_media failed: %s — falling back to send_photo", e)
+            # Fallback: send a new photo in the same thread, then delete the old message
         chat_id = ctx.chat_data.get("results_chat_id") or update.callback_query.message.chat.id
         thread_id = ctx.chat_data.get("results_thread_id")
         try:
@@ -568,6 +639,7 @@ app.add_handler(CommandHandler("cleanup", cleanup))
 app.add_handler(CallbackQueryHandler(handle_name_suggestion, pattern=r"^namesuggest:"))
 app.add_handler(CallbackQueryHandler(handle_find_choice, pattern=r"^(findchoose:|findnext$|findprev$)"))
 app.add_handler(CallbackQueryHandler(handle_oracle, pattern=r"^oracle:"))
+app.add_handler(CallbackQueryHandler(handle_price, pattern=r"^price:"))
 app.add_handler(CallbackQueryHandler(handle_arts_menu, pattern=r"^arts:"))
 app.add_handler(CallbackQueryHandler(handle_pick_art, pattern=r"^pickart:"))
 app.add_handler(CallbackQueryHandler(handle_back_from_arts, pattern=r"^back:"))
