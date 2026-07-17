@@ -573,10 +573,6 @@ app.add_handler(CallbackQueryHandler(handle_arts_nav, pattern=r"^artsnav:(prev|n
 app.add_handler(MessageHandler(filters.COMMAND, lambda update, ctx: None))
 app.add_error_handler(error_handler)
 
-PORT = int(os.getenv("PORT", "8443"))
-app.run_webhook(
-    listen="0.0.0.0",
-    port=PORT,
-    url_path=TOKEN,
-    webhook_url=f"https://{HOST}/{TOKEN}"
-)
+if __name__ == "__main__":
+    logger.info("Bot in avvio in modalità polling...")
+    app.run_polling(drop_pending_updates=True)

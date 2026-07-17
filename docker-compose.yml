@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  mtgsearchbot:
+    build: .
+    container_name: mtgsearchbot
+    restart: always
+    environment:
+      # Inserisci qui il tuo token Telegram
+      - TELEGRAM_TOKEN=il_tuo_token_qui
+    # Opzionale: decommenta e aggiungi eventuali reti esterne se necessarie
+    # networks:
+    #   - la_tua_rete
