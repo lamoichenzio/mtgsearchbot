@@ -26,7 +26,10 @@ logger = logging.getLogger(__name__)
 
 # --- Config ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME", "")
+
+# --- HTTP Client ---
+http_client = requests.Session()
+http_client.headers.update({"User-Agent": "MTGSearchBot/1.0 (Telegram Bot)"})
 MAX_TRACKED_MESSAGES = 500
 
 # --- Utility to track sent message IDs ---
@@ -126,7 +129,7 @@ async def search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.chat_data["results_thread_id"] = None
     track_message(ctx, update.effective_chat.id, working.message_id)
 
-    resp = requests.get("https://api.scryfall.com/cards/named", params={"fuzzy": name})
+    resp = http_client.get("https://api.scryfall.com/cards/named", params={"fuzzy": name})
     if resp.status_code == 200:
         card = resp.json()
         logger.debug("[/search] Fuzzy found: %s", card["name"])
@@ -138,7 +141,7 @@ async def search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     logger.debug("[/search] Fuzzy failed, trying autocomplete")
-    ac_resp = requests.get("https://api.scryfall.com/cards/autocomplete", params={"q": name})
+    ac_resp = http_client.get("https://api.scryfall.com/cards/autocomplete", params={"q": name})
     suggestions = ac_resp.json().get("data", [])
     if not suggestions:
         await ctx.bot.edit_message_text(
@@ -160,7 +163,7 @@ async def handle_name_suggestion(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     await safe_answer(update.callback_query)
     name = update.callback_query.data.split(":", 1)[1]
     logger.info("[suggestion] Selected: %s", name)
-    resp = requests.get("https://api.scryfall.com/cards/named", params={"fuzzy": name})
+    resp = http_client.get("https://api.scryfall.com/cards/named", params={"fuzzy": name})
     if resp.status_code == 200:
         card = resp.json()
         try:
@@ -194,7 +197,7 @@ async def find(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = " ".join(ctx.args).strip()
     logger.info("[/find] Query: %s", query)
 
-    resp = requests.get("https://api.scryfall.com/cards/search", params={"q": query, "unique": "cards", "order": "relevance"})
+    resp = http_client.get("https://api.scryfall.com/cards/search", params={"q": query, "unique": "cards", "order": "relevance"})
     data = resp.json()
     cards = data.get("data", [])
     total = data.get("total_cards", 0)
@@ -364,7 +367,7 @@ async def handle_oracle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     card_id = update.callback_query.data.split(":", 1)[1]
     # Fetch full card by id to ensure oracle text present
     try:
-        r = requests.get(f"https://api.scryfall.com/cards/{card_id}")
+        r = http_client.get(f"https://api.scryfall.com/cards/{card_id}")
         c = r.json()
     except Exception:
         await update.callback_query.message.reply_text("❌ Failed to load oracle text.")
@@ -421,14 +424,14 @@ async def handle_arts_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await safe_answer(update.callback_query)
     card_id = update.callback_query.data.split(":", 1)[1]
     # Fetch base card to get prints_search_uri
-    r = requests.get(f"https://api.scryfall.com/cards/{card_id}")
+    r = http_client.get(f"https://api.scryfall.com/cards/{card_id}")
     base = r.json()
     prints_url = base.get("prints_search_uri")
     if not prints_url:
         await update.callback_query.answer("No alternate illustrations")
         return
 
-    pr = requests.get(prints_url)
+    pr = http_client.get(prints_url)
     pdata = pr.json()
     prints = pdata.get("data", [])
 
@@ -461,7 +464,7 @@ async def handle_arts_nav(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         offset += 10
         # If we need more items to fulfill this page and remote has more, fetch next page and extend
         if offset + 10 > len(prints) and has_more and next_url:
-            pr = requests.get(next_url)
+            pr = http_client.get(next_url)
             pdata = pr.json()
             new_prints = pdata.get("data", [])
             prints.extend(new_prints)
@@ -483,7 +486,7 @@ async def handle_pick_art(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     art_id = update.callback_query.data.split(":", 1)[1]
     logger.debug("[pickart] Requested art_id=%s", art_id)
     # Fetch selected print
-    r = requests.get(f"https://api.scryfall.com/cards/{art_id}")
+    r = http_client.get(f"https://api.scryfall.com/cards/{art_id}")
     c = r.json()
     # Extract image
     url = None
